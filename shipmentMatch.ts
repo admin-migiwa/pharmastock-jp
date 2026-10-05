@@ -56,33 +56,47 @@ export async function lookupShipment(stocks: StockKey[]): Promise<ShipmentLookup
     const codeless = stocks.filter(s => !isValidYjCode(s.yakka_code));
     const codelessNames = Array.from(new Set(codeless.map(s => s.name).filter(Boolean)));
 
-    const [byCode, byName, dictRes] = await Promise.all([
-      codes.length
-        ? supabase.from('shipment_status').select(SELECT_COLUMNS).in('yj_code', codes)
-        : Promise.resolve({ data: [] as ShipmentStatus[], error: null }),
-      nameKeys.length
-        ? supabase.from('shipment_status').select(SELECT_COLUMNS).in('name_key', nameKeys)
-        : Promise.resolve({ data: [] as ShipmentStatus[], error: null }),
-      codelessNames.length
-        ? supabase
-            .from('realtime_stocks')
-            .select('name,yakka_code')
-            .in('name', codelessNames)
-            .neq('yakka_code', '')
-        : Promise.resolve({ data: [] as { name: string; yakka_code: string }[], error: null }),
-    ]);
+    // クエリのURL長制限（GET リクエスト制限）を回避するためのチャンク分割取得ヘルパー
+    const fetchInChunks = async <T,>(
+      items: string[],
+      chunkSize: number,
+      fetcher: (part: string[]) => Promise<{ data: T[] | null; error: any }>
+    ): Promise<T[]> => {
+      if (items.length === 0) return [];
+      const parts = chunk(items, chunkSize);
+      const results = await Promise.all(parts.map(p => fetcher(p)));
+      const combined: T[] = [];
+      for (const res of results) {
+        if (res.error) throw res.error;
+        if (res.data) combined.push(...res.data);
+      }
+      return combined;
+    };
 
-    if (byCode.error || byName.error) {
-      console.warn('出荷状況の取得に失敗しました（shipment_status 未作成の可能性）', byCode.error || byName.error);
-      return stocks.map(() => none);
-    }
+    const [byCodeData, byNameData, dictData] = await Promise.all([
+      fetchInChunks<ShipmentStatus>(
+        codes,
+        100,
+        part => supabase.from('shipment_status').select(SELECT_COLUMNS).in('yj_code', part)
+      ),
+      fetchInChunks<ShipmentStatus>(
+        nameKeys,
+        30, // 日本語URLエンコード長を考慮して30件ずつ安全に取得
+        part => supabase.from('shipment_status').select(SELECT_COLUMNS).in('name_key', part)
+      ),
+      fetchInChunks<{ name: string; yakka_code: string }>(
+        codelessNames,
+        30,
+        part => supabase.from('realtime_stocks').select('name,yakka_code').in('name', part).neq('yakka_code', '')
+      ),
+    ]);
 
     const codeMap = new Map<string, ShipmentStatus>();
     const nameMap = new Map<string, ShipmentStatus[]>();
-    [...((byCode.data as ShipmentStatus[]) || []), ...((byName.data as ShipmentStatus[]) || [])].forEach(r => {
+    [...(byCodeData || []), ...(byNameData || [])].forEach(r => {
       codeMap.set(r.yj_code, r);
     });
-    ((byName.data as ShipmentStatus[]) || []).forEach(r => {
+    (byNameData || []).forEach(r => {
       const list = nameMap.get(r.name_key || '') || [];
       list.push(r);
       nameMap.set(r.name_key || '', list);
@@ -90,7 +104,7 @@ export async function lookupShipment(stocks: StockKey[]): Promise<ShipmentLookup
 
     // 辞書：名称 → YJコード（有効な12桁のもののみ）
     const dictMap = new Map<string, string>();
-    ((dictRes.data as { name: string; yakka_code: string }[]) || []).forEach(d => {
+    (dictData || []).forEach(d => {
       if (isValidYjCode(d.yakka_code)) dictMap.set(normalizeName(d.name), d.yakka_code.trim());
     });
 
