@@ -1,0 +1,8 @@
+{
+  "imports": {},
+  "compilerOptions": {
+    "lib": ["deno.window", "deno.worker"],
+    "allowJs": true,
+    "strict": false
+  }
+}

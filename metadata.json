@@ -1,0 +1,5 @@
+{
+  "name": "PharmaStock JP - Simple Edition",
+  "description": "A focused pharmaceutical inventory management and transfer coordination system for Japanese pharmacies, emphasizing manual 'unneeded' flags and stock matching.",
+  "requestFramePermissions": []
+}

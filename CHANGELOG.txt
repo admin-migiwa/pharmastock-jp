@@ -1,0 +1,165 @@
+PharmaStock JP - CHANGELOG
+（新しい変更ほど上に追記してください）
+========================================
+
+【18pharmastock-jp】20260807_UnstockedCompare「分譲必要数量」保存機能追加／App.tsxデータ復元修正
+対象: UnstockedCompare.tsx / App.tsx
+
+■ (A) UnstockedCompare.tsx の「分譲必要/希望数量」Supabase保存処理の追加
+- 「他店有・自店無リスト」画面にて、入力・編集した必要/希望数量（unstocked_request_amounts）を
+  Supabase データベース（inventory_items）へ一括保存する処理を実装
+- 変更点のある品目のみを検出してピンポイントで UPDATE を行う構造に変更
+
+■ (B) App.tsx の mapFromDb における unstocked_request_amounts 欠落修正
+- DBへの UPDATE 保存自体は成功しているにもかかわらず、ページリロードやデータ再取得（SELECT）時に
+  入力した数値が消えて初期状態（undefined）に戻ってしまう不具合を修正
+- 原因となっていた mapFromDb 関数内に `unstocked_request_amounts: row.unstocked_request_amounts || {}` 
+  のマッピングを追加し、DBからの取得データを正しいプロパティとして保持するよう対応
+
+----------------------------------------
+
+【17pharmastock-jp】20260723_AdoptionCandidate「交換希望」バッジ追加
+対象: AdoptionCandidate.tsx
+
+- 他店在庫の引き受け画面で、不動在庫と交換希望（is_locked＋is_dead_stock）の
+  見分けがつかなかった問題を解消
+- キープ品（is_locked）に「交換希望」バッジを追加（PC表・スマホカード両対応）
+- バッジの意味を説明する案内バナーを画面上部に追加
+  （引き受け後、可能であれば新しいロットを先方に送り返してほしい旨を明記）
+
+----------------------------------------
+
+【16pharmastock-jp】20260713_purchase_historyエラー処理／App.tsx再修正／小数入力修正／不要数量個別管理／棚卸再取込みフラグリセット
+対象: index.ts / App.tsx / AdoptionCandidate.tsx / InventoryList.tsx / FinalDetermination.tsx / Dashboard.tsx / Import.tsx / types.ts / schema_full.sql
+
+■ (A) purchase_history（入庫履歴）UPSERTのエラーハンドリング漏れ修正
+- inventory_items側は直していたが、purchase_history側のUPSERTにres.okチェックが
+  無く、失敗しても「更新完了」と表示されていた不具合を修正
+- 不要だったPreferヘッダーの「action=upsert」を削除
+
+■ (B) App.tsxのrace-condition修正が消えていた事故の再修正（2回目のミス）
+- Matching廃止対応の際、誤ってrace-condition修正前の古いApp.tsxを土台にしてしまい、
+  updateInventoryItem関数ごと消えて不動/キープのトグルが効かなくなっていた不具合を修正
+- InventoryList.tsx / AdoptionCandidate.tsxへの配線をonUpdateItemベースに戻す
+
+■ (C) AdoptionCandidate.tsxの小数入力バグ修正
+- parseInt(value, 10)のため小数（mL等）が入力できなかった不具合をparseFloatに修正
+  （2026年7月3日時点から存在していた既存バグ、今回の一連の修正とは別件）
+- スマホの入力キーボードをinputMode="numeric"→"decimal"に変更
+- PC・スマホ両方の入力欄にstep="any"を追加
+
+■ (D) 「不動在庫の不要数量」個別管理機能の新規実装
+- DBに dead_stock_qty 列を追加（NUMERIC、初期値NULL）。在庫数の一部だけを
+  不要指定できるようにする機能
+- InventoryList.tsx：不動在庫チェック時に数量入力欄を新設（初期値は在庫数全部、
+  PC表・スマホカード両対応）
+- FinalDetermination.tsx：出庫/不動の配分計算の起点をstock_totalからdead_stock_qtyに変更
+- AdoptionCandidate.tsx：他店に提示する引受可能数量の上限をdead_stock_qtyに変更
+- Dashboard.tsx：不動在庫の金額集計をdead_stock_qtyの割合で按分するよう変更
+- Import.tsx：インポート結果画面のトグルにも同じ初期化ロジックを追加
+- ついでに types.ts から廃止済みの 'matching' を削除
+- schema_full.sql：CREATE OR REPLACE VIEWの列順不一致エラー対応（DROP+CREATEに変更）、
+  CREATE POLICYの冪等化（DROP POLICY IF EXISTS追加）も実施
+
+■ (E) 棚卸データ再取込み時のフラグ引き継ぎロジック見直し
+- 「在庫数量が前回と完全に同じ場合のみ」不動・キープ・不要数量・引受情報を維持し、
+  変わっていれば全てリセットする方式に変更
+  （半年に一度の棚卸のため、前回設定したフラグはほぼ意味を失っているという判断）
+- 複数CSV行が1品目に集約されるケースでも、集約完了後の最終数量で正しく判定されるよう
+  1行ごとの即時判定から2段階処理に修正
+- dead_stock_qtyも他のフラグと同じ流儀で明示的に引き継ぎ/リセット対象に追加
+
+----------------------------------------
+
+【15pharmastock-jp】20260706_flag-label-UI変更／Matching廃止／交換希望ロジック見直し
+対象: InventoryList.tsx / Import.tsx / Dashboard.tsx / App.tsx / FinalDetermination.tsx / Manual.tsx / index.ts
+
+■ (1) is_locked / is_dead_stock の表記変更（20260703_03の実装完了）
+- 「不要」→「不動在庫」、「錠(ロック)」→「キープ」に統一
+- 不動在庫＋キープ両方ONの品目に「キープ・交換希望」の複合バッジを新設
+- 鍵アイコン(Lock/Unlock)をピンアイコン(Pin/PinOff)に変更
+- ※実装時、20260703_02のrace-condition修正前の古いInventoryList.tsxを誤って土台にしてしまい、
+  トグルボタンが反応しなくなる不具合が一時的に発生。onUpdateItemベースの正しい版に修正済み。
+
+■ (2) Matching.tsx機能の廃止
+- 重複していた「在庫マッチング」画面を削除（引受検討＋最終決定の組み合わせで代替済みのため）
+- App.tsxのナビゲーションメニュー・importからMatching関連を削除
+- Dashboard.tsxの「有力なマッチングがあります」ボタン等の遷移先を「他店在庫の引き受け(adoption)」画面に変更
+- ※types.tsのViewType定義から'matching'を削除するのはプロジェクト側で対応が必要
+
+■ (3) Manual.tsxを現行仕様に合わせて全面更新
+- キープ/不動在庫の説明を現行仕様に修正（旧「ロック＝上書き保護」の誤った説明を訂正）
+- 「最終決定・指示書印刷(FinalDetermination)」の章を新設
+- 「在庫マッチング(Matching)」の章を削除
+
+■ (4) FinalDetermination.tsxに「交換希望」タブを新設 → その後、方針転換
+- 当初：不動在庫＋キープ両方ONの品目は「交換希望」タブに分離し、自店の在庫は減らさない設計で実装
+- 方針転換：「欠品より期限切れの方が避けるべきリスク」という判断のもと、
+  キープ品も通常の不動在庫と同様に出庫/不動の集計・実処理に含めるよう変更
+  （在庫は実際に動かす前提とし、「交換希望」タブは出庫/不動リストと二重表示する目印として残す）
+
+■ (5) Dashboard.tsxの不要ブロック削除（20260708追記）
+- 「譲渡通知」セクションを削除（廃止したMatching.tsxへの導線が残っていたため）
+- 「Quick Menu」セクションを削除
+- 上記でのみ使われていたtransferOpportunities計算、未使用アイコンimportも削除
+
+■ (6) 入庫履歴内訳（バラ換算）の計算バグ修正（20260708追記）
+- 症状：包装規格や薬品名の内容量（例:「本20mL」）が全角数字だと正しく読み取れず、
+  内容量を1として計算してしまい、実際より大幅に少ない数量で入庫履歴が登録されていた
+  例）ナジフロキサシンローション（本20mL）、規格空白、数量4
+      → 本来80mLになるべきところ4mLとして記録されていた
+      同、規格「10本入り」、数量1
+      → 本来200mLになるべきところ10mLとして記録されていた
+- 原因：parseContentAmount関数の正規表現が (a)全角数字に非対応 (b)「ml」「ｷｯﾄ」等の
+  複数文字の単位を1文字しかマッチしない文字クラスで書いていた、の2点
+- 修正：全角→半角変換処理を追加し、単位判定を交代(|)方式に変更
+- 【重要】この修正はデプロイするだけでは過去に取り込み済みのデータは直らない。
+  過去分を正しい数量に直すには該当の入庫履歴CSVを再インポートする必要がある
+
+詳細: 必要であれば20260706_CHANGELOG.txtとして別途詳細版を作成可能
+
+----------------------------------------
+
+【14pharmastock-jp】20260703_02_App-race-condition修正
+対象: App.tsx / InventoryList.tsx / AdoptionCandidate.tsx
+- 全店舗・全品目を丸ごとDBへupsertするuseEffectを廃止
+- 変更された行だけをピンポイントでUPDATEするupdateInventoryItem/updateInventoryItemsを追加
+- 他店の同時編集が古いローカル内容で上書きされる不具合を解消
+- 触っていない品目までupdated_atが一斉更新される現象も解消
+詳細: 20260703_02_CHANGELOG.txt 参照
+
+----------------------------------------
+
+【13pharmastock-jp】20260703_01_upsert-onconflict修正
+対象: index.ts (Edge Function: import-inventory)
+- UPSERT時のon_conflict指定方法の誤りを修正（Preferヘッダー→URLクエリパラメータへ）
+- INSERT/DELETE失敗時にエラーを握りつぶさず例外を投げるよう修正
+- 棚卸データインポートで在庫数・新規品目が反映されない不具合を解消
+詳細: 20260703_01_CHANGELOG.txt 参照
+
+----------------------------------------
+
+【12pharmastock-jp】入庫同期前チェック追加
+対象: ExpiryImport.tsx（入庫履歴同期）
+- 入庫履歴（purchase_history）は過去データが蓄積されていく方式のため、店舗選択を
+  間違えたまま同期すると、誤ったデータが蓄積され後から取り消しにくい。
+- そのため「同期を実行」ボタン押下時に、対象店舗名を大きく表示する確認モーダルを追加し、
+  「間違いありません」を押すまで実際の通信（Edge Function呼び出し）を止めるようにした。
+- 一方、現在庫同期（RealtimeStockImport.tsx／realtime_stocksテーブル）は毎回全件を
+  削除してから入れ直す完全データ入替方式のため、店舗を間違えても古いデータが混ざり込む
+  心配がなく、同様の確認モーダルは付けていない（2026年7月時点、2店舗間の運用のみのため
+  リスクは限定的という判断）。
+
+----------------------------------------
+
+【11pharmastock-jp】
+- 詳細をここに追記してください（記録開始前）
+
+----------------------------------------
+
+【10pharmastock-jp】
+- 詳細をここに追記してください（記録開始前）
+
+========================================
+【今後の予定・未着手】
+- 現時点で未着手の項目はありません
