@@ -1,12 +1,13 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   FileSpreadsheet, Upload, CheckCircle, AlertCircle, Info, Building2,
-  FileWarning, RefreshCw, BarChart3, AlertTriangle
+  FileWarning, RefreshCw, BarChart3, AlertTriangle, Truck, ChevronLeft, ChevronRight,
+  ChevronDown, ChevronUp, Package
 } from 'lucide-react';
 import readXlsxFile from 'read-excel-file/browser';
 import { supabase } from '../supabase';
-import { Store } from '../types';
-import { normalizeName, isValidYjCode } from '../shipmentMatch';
+import { Store, RealtimeStock, ShipmentLookup } from '../types';
+import { normalizeName, isValidYjCode, lookupShipment, getShipmentBadge } from '../shipmentMatch';
 
 interface ShipmentStatusImportProps {
   storeId: string;
@@ -56,11 +57,35 @@ const orNull = (v: any): string | null => {
   return s === '' ? null : s;
 };
 
-// 出荷調整中か：⑫が通常出荷以外、または⑰が「A（出荷量通常／増加）」以外（減少・停止・薬価削除予定など）
-const judgeAdjusting = (status: string, volume: string | null): boolean => {
-  if (!status.includes('通常出荷')) return true;
-  if (volume && !/^A/.test(volume)) return true;
-  return false;
+const ShipmentBadge: React.FC<{ lookup?: ShipmentLookup }> = ({ lookup }) => {
+  if (!lookup || lookup.kind === 'none') {
+    return <span className="text-[10px] text-slate-300 font-bold">情報なし</span>;
+  }
+  if (lookup.kind === 'ambiguous') {
+    return <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-amber-50 text-amber-600 border border-amber-200">要確認</span>;
+  }
+  const badge = getShipmentBadge(lookup.rows);
+  const mark = lookup.kind !== 'code'
+    ? <span className="text-[8px] text-slate-400 font-bold">名称照合</span>
+    : null;
+  if (!badge) {
+    return (
+      <div className="flex flex-col items-center gap-0.5">
+        <span className="text-[10px] text-slate-400 font-bold">通常</span>
+        {mark}
+      </div>
+    );
+  }
+  const cls =
+    badge.level === 'stop' ? 'bg-red-50 text-red-600 border-red-200' :
+    badge.level === 'limited' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+    'bg-orange-50 text-orange-600 border-orange-200';
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <span className={`text-[10px] font-black px-2 py-0.5 rounded-md border whitespace-nowrap ${cls}`}>{badge.label}</span>
+      {mark}
+    </div>
+  );
 };
 
 const parseWorkbook = async (file: File): Promise<ParsedRow[]> => {
@@ -144,6 +169,13 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
   const [isReporting, setIsReporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // 自店の出荷調整対象医薬品一覧用
+  const [adjustingItems, setAdjustingItems] = useState<{ stock: RealtimeStock; shipment: ShipmentLookup }[]>([]);
+  const [isAdjustingLoading, setIsAdjustingLoading] = useState<boolean>(false);
+  const [adjustingPage, setAdjustingPage] = useState<number>(1);
+  const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
+  const ITEMS_PER_PAGE = 20;
+
   const currentStoreName = stores.find(s => s.id === storeId)?.name || '未設定の店舗';
 
   const loadLastImport = async () => {
@@ -162,7 +194,46 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
     }
   };
 
-  useEffect(() => { loadLastImport(); }, []);
+  const loadAdjustingStocks = useCallback(async () => {
+    if (!storeId) return;
+    setIsAdjustingLoading(true);
+    try {
+      const { data: stocks, error } = await supabase
+        .from('realtime_stocks')
+        .select('id, store_id, name, spec, stock_qty, unit, yakka_code, expiry_date, updated_at, stock_updated_at')
+        .eq('store_id', storeId)
+        .order('name');
+
+      if (error) throw error;
+      if (!stocks || stocks.length === 0) {
+        setAdjustingItems([]);
+        return;
+      }
+
+      const lookups = await lookupShipment(stocks.map(s => ({ name: s.name, yakka_code: s.yakka_code })));
+
+      const filtered = stocks.map((stock, idx) => ({
+        stock: stock as RealtimeStock,
+        shipment: lookups[idx]
+      })).filter(item => {
+        if (!item.shipment) return false;
+        if (item.shipment.kind === 'ambiguous') return true;
+        return !!getShipmentBadge(item.shipment.rows);
+      });
+
+      setAdjustingItems(filtered);
+      setAdjustingPage(1);
+    } catch (err) {
+      console.error('自店出荷調整対象薬品の取得エラー:', err);
+    } finally {
+      setIsAdjustingLoading(false);
+    }
+  }, [storeId]);
+
+  useEffect(() => {
+    loadLastImport();
+    loadAdjustingStocks();
+  }, [storeId, loadAdjustingStocks]);
 
   const setMsg = (text: string, type: 'success' | 'error' | 'info' | '') => { setMessage(text); setMessageType(type); };
 
@@ -218,6 +289,7 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
       setSelectedFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
       await loadLastImport();
+      await loadAdjustingStocks();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : '取り込みに失敗しました', 'error');
     } finally {
@@ -441,6 +513,151 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
             <p className="text-[10px] text-slate-400 font-bold mt-3 flex items-start gap-1">
               <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
               「情報なし」には、厚労省の一覧に載っていない品目（医療材料・未収載品・一般用など）も含まれます。
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* 選択店舗の出荷調整対象医薬品一覧 */}
+      <div className="bg-white border-2 border-slate-100 rounded-[24px] p-6 space-y-4">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-sm font-black text-slate-800 flex items-center gap-2">
+              <Truck size={18} className="text-amber-500" />
+              【{currentStoreName}】在庫中の出荷調整対象医薬品
+            </h2>
+            <p className="text-[11px] text-slate-400 font-bold mt-1">
+              選択されている店舗の現在庫のうち、出荷制限や供給停止が該当する医薬品の一覧です。
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-black bg-amber-50 text-amber-700 px-3 py-1.5 rounded-xl border border-amber-200">
+              {adjustingItems.length.toLocaleString()} 品目
+            </span>
+            <button
+              onClick={() => loadAdjustingStocks()}
+              disabled={isAdjustingLoading}
+              className="p-2 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 transition-all disabled:opacity-50"
+              title="一覧を更新"
+            >
+              <RefreshCw size={14} className={isAdjustingLoading ? 'animate-spin' : ''} />
+            </button>
+          </div>
+        </div>
+
+        {isAdjustingLoading ? (
+          <div className="text-center py-12 text-slate-400 font-bold text-xs flex items-center justify-center gap-2">
+            <RefreshCw size={16} className="animate-spin text-blue-600" /> 在庫データと照合中...
+          </div>
+        ) : adjustingItems.length > 0 ? (
+          <div className="space-y-4">
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs font-bold text-slate-700">
+                <thead>
+                  <tr className="text-[10px] text-slate-400 uppercase tracking-widest border-b border-slate-100">
+                    <th className="text-left py-2.5 px-3">薬品名</th>
+                    <th className="text-right py-2.5 px-3 w-[12%]">現在庫数</th>
+                    <th className="text-center py-2.5 px-3 w-[8%]">単位</th>
+                    <th className="text-center py-2.5 px-3 w-[18%]">出荷状況</th>
+                    <th className="text-center py-2.5 px-3 w-[10%]">詳細</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {adjustingItems
+                    .slice((adjustingPage - 1) * ITEMS_PER_PAGE, adjustingPage * ITEMS_PER_PAGE)
+                    .map(({ stock, shipment }) => {
+                      const isExpanded = expandedItemId === stock.id;
+                      return (
+                        <React.Fragment key={stock.id}>
+                          <tr className="hover:bg-slate-50/80 transition-colors">
+                            <td className="py-3 px-3">
+                              <div className="font-black text-slate-800">{stock.name}</div>
+                              <div className="text-[10px] text-slate-400 font-mono tracking-tighter">
+                                {stock.spec} {stock.yakka_code ? `(${stock.yakka_code})` : ''}
+                              </div>
+                            </td>
+                            <td className="py-3 px-3 text-right font-black text-blue-600 text-sm tabular-nums">
+                              {stock.stock_qty.toLocaleString()}
+                            </td>
+                            <td className="py-3 px-3 text-center text-slate-500">{stock.unit}</td>
+                            <td className="py-3 px-3 text-center">
+                              <ShipmentBadge lookup={shipment} />
+                            </td>
+                            <td className="py-3 px-3 text-center">
+                              <button
+                                onClick={() => setExpandedItemId(isExpanded ? null : stock.id)}
+                                className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-all text-[11px] font-bold flex items-center gap-1 mx-auto"
+                              >
+                                {isExpanded ? '閉じる' : '詳細'}
+                                {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                              </button>
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr className="bg-slate-50/90 border-l-4 border-l-amber-500">
+                              <td colSpan={5} className="p-4">
+                                <div className="space-y-2">
+                                  <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                                    <Truck size={12} /> 厚労省 供給状況の詳細
+                                  </div>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    {shipment.rows.map(r => (
+                                      <div key={r.yj_code} className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm text-xs font-bold space-y-1">
+                                        <div className="text-slate-900 font-black flex justify-between">
+                                          <span>{r.name}</span>
+                                          <span className="text-slate-400 text-[10px] font-mono">{r.yj_code}</span>
+                                        </div>
+                                        <div className="text-amber-700">{r.status} {r.volume_status ? ` / ${r.volume_status}` : ''}</div>
+                                        {r.reason && <div className="text-slate-600 text-[11px]">理由: {r.reason}</div>}
+                                        {r.outlook && <div className="text-slate-600 text-[11px]">解消時期: {r.outlook} {r.outlook_detail || ''}</div>}
+                                        {r.status_date && <div className="text-slate-400 text-[10px]">更新日: {r.status_date}</div>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* ページネーション */}
+            {adjustingItems.length > ITEMS_PER_PAGE && (
+              <div className="flex items-center justify-between pt-2 border-t border-slate-100 flex-wrap gap-2">
+                <div className="text-xs font-bold text-slate-500">
+                  {(adjustingPage - 1) * ITEMS_PER_PAGE + 1} 〜 {Math.min(adjustingPage * ITEMS_PER_PAGE, adjustingItems.length)} 件表示 / 全 {adjustingItems.length.toLocaleString()} 件
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setAdjustingPage(p => Math.max(1, p - 1))}
+                    disabled={adjustingPage === 1}
+                    className="p-2 rounded-xl bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all font-bold text-xs flex items-center gap-1"
+                  >
+                    <ChevronLeft size={14} /> 前へ
+                  </button>
+                  <span className="text-xs font-black text-slate-700 px-2">
+                    {adjustingPage} / {Math.ceil(adjustingItems.length / ITEMS_PER_PAGE)}
+                  </span>
+                  <button
+                    onClick={() => setAdjustingPage(p => Math.min(Math.ceil(adjustingItems.length / ITEMS_PER_PAGE), p + 1))}
+                    disabled={adjustingPage >= Math.ceil(adjustingItems.length / ITEMS_PER_PAGE)}
+                    className="p-2 rounded-xl bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all font-bold text-xs flex items-center gap-1"
+                  >
+                    次へ <ChevronRight size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="text-center py-10 bg-slate-50/50 rounded-2xl border-2 border-dashed border-slate-100">
+            <Package className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+            <p className="text-xs font-bold text-slate-400">
+              現在、{currentStoreName} に在庫がある品目の中に出荷調整対象の医薬品はありません
             </p>
           </div>
         )}
