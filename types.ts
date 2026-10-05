@@ -107,4 +107,31 @@ export interface PurchaseHistory {
   updated_at: string;
 }
 
-export type ViewType = 'dashboard' | 'realtime_search' | 'inventory' | 'adoption' | 'realtime_import' | 'expiry_import' | 'import' | 'stores' | 'manual' | 'unstocked_compare';
+// --- 出荷調整状況（厚労省「医療用医薬品の供給状況」）---
+export interface ShipmentStatus {
+  yj_code: string;               // ⑤YJコード
+  name: string;                  // ⑥品名
+  name_key?: string;             // 照合用に正規化した品名
+  maker?: string | null;         // ⑦製造販売業者名
+  status: string;                // ⑫出荷対応の状況（例：①通常出荷）
+  status_date?: string | null;   // ⑬⑫の更新日
+  reason?: string | null;        // ⑭限定出荷/供給停止の理由
+  outlook?: string | null;       // ⑮解除/解消見込み
+  outlook_detail?: string | null;// ⑯解除/解消見込み時期（在庫消尽時期）
+  volume_status?: string | null; // ⑰出荷量の現在の状況
+  volume_outlook?: string | null;// ⑱出荷量の改善見込み時期
+  volume_amount?: string | null; // ⑲出荷量の改善見込み量
+  info_date?: string | null;     // ⑳⑫以外の更新日
+  is_new?: boolean;              // 今回掲載時の更新有無（New）
+  is_adjusting: boolean;         // 出荷調整中（通常出荷以外／出荷量減少・停止等）
+  imported_at?: string;
+}
+
+// 在庫1行に対する出荷状況の突合結果
+//  code: YJコード一致 / name: 名称一致 / dict: 他店辞書で補完 / ambiguous: 複数候補（要確認） / none: 情報なし
+export interface ShipmentLookup {
+  kind: 'code' | 'name' | 'dict' | 'ambiguous' | 'none';
+  rows: ShipmentStatus[];
+}
+
+export type ViewType = 'dashboard' | 'realtime_search' | 'inventory' | 'adoption' | 'realtime_import' | 'expiry_import' | 'shipment_import' | 'import' | 'stores' | 'manual' | 'unstocked_compare';

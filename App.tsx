@@ -12,7 +12,8 @@ import {
   CalendarRange,
   Building2,
   HelpCircle,
-  LogOut
+  LogOut,
+  FileSpreadsheet
 } from 'lucide-react';
 import { Store, InventoryItem, ViewType } from './types';
 import Dashboard from './components/Dashboard';
@@ -24,6 +25,7 @@ import FinalDetermination from './components/FinalDetermination';
 import RealtimeSearch from './components/RealtimeSearch'; 
 import RealtimeStockImport from './components/RealtimeStockImport'; 
 import ExpiryImport from './components/ExpiryImport';
+import ShipmentStatusImport from './components/ShipmentStatusImport';
 import Manual from './components/Manual';
 import LoginScreen from './components/LoginScreen';
 import UnstockedCompare from './components/UnstockedCompare';
@@ -207,6 +209,7 @@ const navSections = [
   { title: '在庫更新', items: [
       { id: 'expiry_import', label: 'STEP1：入庫履歴同期', icon: CalendarRange },
       { id: 'realtime_import', label: 'STEP2：現在庫同期', icon: RefreshCw },
+      { id: 'shipment_import', label: '出荷状況インポート', icon: FileSpreadsheet },
     ]},
   { title: '棚卸業務', items: [
       { id: 'dashboard', label: 'ダッシュボード', icon: LayoutDashboard },
@@ -328,6 +331,7 @@ const navSections = [
             {activeView === 'expiry_import' && <ExpiryImport storeId={currentStoreId} stores={stores} />}
             {activeView === 'inventory' && <InventoryList inventory={inventory} onUpdateItem={updateInventoryItem} onUpdateItems={updateInventoryItems} currentStoreId={currentStoreId} stores={stores} filterCodes={inventoryFilterCodes} onClearFilter={() => setInventoryFilterCodes(null)} />}
             {activeView === 'realtime_import' && <RealtimeStockImport storeId={currentStoreId} stores={stores} />}
+            {activeView === 'shipment_import' && <ShipmentStatusImport storeId={currentStoreId} stores={stores} />}
             {activeView === 'adoption' && (
               <div className="flex flex-col h-full space-y-4">
                 <div className="flex bg-white p-1 rounded-2xl shadow-sm border border-slate-200 w-full sm:w-fit self-center">

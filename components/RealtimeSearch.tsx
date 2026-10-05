@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Search, Globe, Clock, Building2, RefreshCcw, LayoutGrid, CircleCheckBig } from 'lucide-react';
+import { Search, Globe, Clock, Building2, RefreshCcw, LayoutGrid, CircleCheckBig, AlertTriangle, Truck } from 'lucide-react';
 import { supabase } from '../supabase';
-import { Store, RealtimeStock } from '../types';
+import { Store, RealtimeStock, ShipmentLookup } from '../types';
+import { lookupShipment, getShipmentBadge } from '../shipmentMatch';
 
 interface RealtimeSearchProps {
   stores: Store[];
@@ -65,17 +66,108 @@ const getExpiryStatus = (dateString: string | null) => {
   return { text: dateString, class: 'text-slate-600' };
 };
 
+// 出荷状況バッジ（一覧用）
+const ShipmentBadge: React.FC<{ lookup?: ShipmentLookup }> = ({ lookup }) => {
+  if (!lookup || lookup.kind === 'none') {
+    return <span className="text-[10px] text-slate-300 font-bold">情報なし</span>;
+  }
+  if (lookup.kind === 'ambiguous') {
+    return <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-amber-50 text-amber-600 border border-amber-200">要確認</span>;
+  }
+  const badge = getShipmentBadge(lookup.rows);
+  const mark = lookup.kind !== 'code'
+    ? <span className="text-[8px] text-slate-400 font-bold">名称照合</span>
+    : null;
+  if (!badge) {
+    return (
+      <div className="flex flex-col items-center gap-0.5">
+        <span className="text-[10px] text-slate-400 font-bold">通常</span>
+        {mark}
+      </div>
+    );
+  }
+  const cls =
+    badge.level === 'stop' ? 'bg-red-50 text-red-600 border-red-200' :
+    badge.level === 'limited' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+    'bg-orange-50 text-orange-600 border-orange-200';
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <span className={`text-[10px] font-black px-2 py-0.5 rounded-md border whitespace-nowrap ${cls}`}>{badge.label}</span>
+      {mark}
+    </div>
+  );
+};
+
+// 出荷状況の詳細（行展開用）
+const ShipmentDetail: React.FC<{ lookup?: ShipmentLookup }> = ({ lookup }) => {
+  const via = lookup?.kind === 'code' ? 'YJコード一致' : lookup?.kind === 'name' ? '名称照合' : lookup?.kind === 'dict' ? '他店辞書で補完' : '';
+  return (
+    <div className="space-y-3 mb-6">
+      <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+        <Truck size={12} /> 出荷状況（厚労省 供給状況）{via && <span className="text-slate-300 normal-case">／{via}</span>}
+      </h4>
+      {!lookup || lookup.kind === 'none' ? (
+        <div className="text-xs text-slate-400 italic">厚労省の供給状況一覧に該当する情報がありません。</div>
+      ) : (
+        <>
+          {lookup.kind === 'ambiguous' && (
+            <div className="text-xs text-amber-600 font-bold flex items-center gap-1">
+              <AlertTriangle size={12} /> 名称が一致する候補が複数あります。規格・包装を確認してください。
+            </div>
+          )}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {lookup.rows.map(r => {
+              const b = getShipmentBadge([r]);
+              const rowCls = b ? (b.level === 'stop' ? 'border-red-200' : b.level === 'limited' ? 'border-amber-200' : 'border-orange-200') : 'border-slate-200';
+              const items: [string, string | null | undefined][] = [
+                ['出荷対応', r.status],
+                ['出荷量', r.volume_status],
+                ['理由', r.reason],
+                ['解除・解消見込み', r.outlook],
+                ['見込み時期', r.outlook_detail],
+                ['出荷量改善見込み', [r.volume_outlook, r.volume_amount].filter(Boolean).join(' / ')],
+                ['出荷対応の更新日', r.status_date],
+                ['その他情報の更新日', r.info_date],
+              ];
+              return (
+                <div key={r.yj_code} className={`bg-white p-3 rounded-xl border shadow-sm ${rowCls}`}>
+                  <div className="flex items-start justify-between gap-2 mb-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-black text-slate-800 truncate">{r.name}</div>
+                      <div className="text-[9px] text-slate-400 font-mono">{r.yj_code}{r.maker ? ` / ${r.maker}` : ''}</div>
+                    </div>
+                    {r.is_new && <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-blue-600 text-white flex-shrink-0">New</span>}
+                  </div>
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]">
+                    {items.filter(([, v]) => v).map(([k, v]) => (
+                      <React.Fragment key={k}>
+                        <dt className="text-slate-400 font-bold whitespace-nowrap">{k}</dt>
+                        <dd className="text-slate-700 font-bold break-words">{v}</dd>
+                      </React.Fragment>
+                    ))}
+                  </dl>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
 const RealtimeSearch: React.FC<RealtimeSearchProps> = ({ stores, currentStoreId }) => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [targetStoreId, setTargetStoreId] = useState<string>('');
   const [isAllStores, setIsAllStores] = useState<boolean>(true);
-  const [searchResults, setSearchResults] = useState<{ store: Store; stock: RealtimeStock }[]>([]);
+  const [searchResults, setSearchResults] = useState<{ store: Store; stock: RealtimeStock; shipment?: ShipmentLookup }[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
   const [expandedMobileId, setExpandedMobileId] = useState<string | null>(null);
   const [selectedDetailId, setSelectedDetailId] = useState<string | null>(null);
   const [details, setDetails] = useState<{ [key: string]: StockDetail[] }>({});
   const [isDetailLoading, setIsDetailLoading] = useState<boolean>(false);
+  const [onlyAdjusting, setOnlyAdjusting] = useState<boolean>(false);
 
   const fetchStockDetail = async (stock: any) => {
   const uniqueId = `${stock.store_id}-${stock.id}`;
@@ -210,8 +302,11 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
         .or(`yakka_code.in.(${yakkaCodes.join(',')}),name.in.("${names.join('","')}")`)
         .order('updated_at', { ascending: false });
 
+      // 出荷状況の突合（YJコード→正規化名称→他店辞書。失敗しても検索結果は表示する）
+      const lookups = await lookupShipment(stocks.map(s => ({ name: s.name, yakka_code: s.yakka_code })));
+
       // STEP 3: マージ処理
-      const results = stocks.map((stock) => {
+      const results = stocks.map((stock, idx) => {
         const store = stores.find((s) => s.id === stock.store_id) || { id: stock.store_id, name: '不明' };
         
         // 突合：薬価コード優先、次いで名称一致
@@ -227,6 +322,7 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
             ...stock,
             last_purchase_updated_at: match ? match.updated_at : null
           } as RealtimeStock,
+          shipment: lookups[idx],
         };
       });
 
@@ -289,6 +385,11 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
     }, 300);
     return () => clearTimeout(timer);
   }, [searchQuery, targetStoreId, isAllStores, performSearch]);
+
+  // 「出荷調整中のみ」絞り込み（要確認は見落とし防止のため表示し続ける）
+  const displayResults = onlyAdjusting
+    ? searchResults.filter(r => r.shipment && (r.shipment.kind === 'ambiguous' || getShipmentBadge(r.shipment.rows)))
+    : searchResults;
 
   return (
     <div className="w-full max-w-7xl mx-auto p-4 space-y-6">
@@ -362,6 +463,17 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
             />
           </div>
         </div>
+        <label className="flex items-center gap-2 cursor-pointer w-fit select-none">
+          <input
+            type="checkbox"
+            checked={onlyAdjusting}
+            onChange={(e) => setOnlyAdjusting(e.target.checked)}
+            className="w-4 h-4 accent-amber-500"
+          />
+          <span className="text-xs font-black text-slate-600 flex items-center gap-1">
+            <AlertTriangle size={12} className="text-amber-500" /> 出荷調整中のみ表示
+          </span>
+        </label>
       </div>
 
       {error && <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200 font-bold">{error}</div>}
@@ -371,7 +483,7 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
           <RefreshCcw className="w-12 h-12 text-blue-600 animate-spin mx-auto" />
           <p className="text-slate-400 font-black mt-4 uppercase tracking-widest text-sm font-mono">Searching Database...</p>
         </div>
-      ) : searchResults.length > 0 ? (
+      ) : displayResults.length > 0 ? (
         <div className="bg-white rounded-[24px] md:rounded-[32px] shadow-xl shadow-slate-200/50 border border-slate-100 overflow-hidden">
           
           {/* デスクトップ表示 */}
@@ -379,15 +491,16 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
             <table className="w-full text-left border-collapse table-fixed">
               <thead>
               <tr className="bg-slate-50/50 border-b border-slate-100">
-                <th className="w-[18%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">店舗</th>
-                <th className="w-[35%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">薬品名</th>
-                <th className="w-[15%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">在庫数</th>
-                <th className="w-[10%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">単位</th>
-                <th className="w-[22%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">使用期限</th>
+                <th className="w-[16%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">店舗</th>
+                <th className="w-[30%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">薬品名</th>
+                <th className="w-[13%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">在庫数</th>
+                <th className="w-[8%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">単位</th>
+                <th className="w-[17%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">出荷状況</th>
+                <th className="w-[16%] px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">使用期限</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-bold">
-                {searchResults.map((result) => {
+                {displayResults.map((result) => {
                   const expiry = getExpiryStatus(result.stock.expiry_date);
                   const uniqueId = `${result.stock.store_id}-${result.stock.id}`;
                 return (
@@ -430,6 +543,9 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
                       <td className="px-6 py-4 text-center">
                         <span className="text-xs text-slate-500 font-bold">{result.stock.unit}</span>
                       </td>
+                      <td className="px-6 py-4 text-center">
+                        <ShipmentBadge lookup={result.shipment} />
+                      </td>
                       <td className="px-6 py-4 text-center border-l border-slate-50">
                         <div className="flex flex-col items-center">
                           <div className={`text-xs font-mono font-bold ${expiry.class}`}>
@@ -441,7 +557,8 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
 
                       {selectedDetailId === uniqueId && (
                     <tr className="bg-slate-50/80 border-l-4 border-l-blue-500">
-                      <td colSpan={5} className="px-8 py-6">
+                      <td colSpan={6} className="px-8 py-6">
+                        <ShipmentDetail lookup={result.shipment} />
                         <div className="space-y-3">
                           <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
                             <LayoutGrid size={12} /> 直近の入庫履歴内訳
@@ -482,7 +599,7 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
 
           {/* モバイル表示 */}
           <div className="md:hidden divide-y divide-slate-100">
-            {searchResults.map((result) => {
+            {displayResults.map((result) => {
               const expiry = getExpiryStatus(result.stock.expiry_date);
               const uniqueId = `${result.stock.store_id}-${result.stock.id}`;
               const isExpanded = expandedMobileId === uniqueId;
@@ -513,6 +630,9 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
                     {result.stock.name}
                   </div>
 
+                <div className="flex items-center gap-2 mt-1">
+                  <ShipmentBadge lookup={result.shipment} />
+                </div>
                 <div className="flex justify-between items-end mt-1">
                   <div className="text-[8px] text-slate-400">
                     {result.stock.yakka_code}<br/>
@@ -537,7 +657,9 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
           <p className="text-slate-400 font-black text-sm px-6">
             {!isAllStores && !targetStoreId 
               ? "店舗を選択するか、全店検索をオンにしてください" 
-              : "該当する在庫データが見つかりませんでした"}
+              : onlyAdjusting && searchResults.length > 0
+                ? "検索結果の中に出荷調整中の品目はありません"
+                : "該当する在庫データが見つかりませんでした"}
           </p>
         </div>
       )}

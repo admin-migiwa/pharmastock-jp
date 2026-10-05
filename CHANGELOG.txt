@@ -2,6 +2,18 @@ PharmaStock JP - CHANGELOG
 （新しい変更ほど上に追記してください）
 ========================================
 
+【19pharmastock-jp】20261005_出荷状況インポート／在庫照会に出荷状況表示を追加
+対象: ShipmentStatusImport.tsx(新規) / shipmentMatch.ts(新規) / RealtimeSearch.tsx / App.tsx / types.ts / supabase/shipment_status.sql(新規)
+
+- 新メニュー「出荷状況インポート」（在庫更新）：厚労省「医療用医薬品の供給状況」xlsxを取込（全店共通・全置換）
+- 在庫照会に「出荷状況」列を追加（供給停止／限定出荷／出荷量減少等のバッジ、行展開で詳細表示、「出荷調整中のみ表示」）
+- 突合：YJコード一致 → 正規化名称一致（コードなし店舗）→ 他店の名称→YJ辞書で補完 → 情報なし
+- 店舗別の突合率チェック機能を追加
+- 事前準備：Supabase SQL Editorで supabase/shipment_status.sql を一度実行すること
+- 依存追加: read-excel-file
+
+----------------------------------------
+
 【18pharmastock-jp】20260807_UnstockedCompare「分譲必要数量」保存機能追加／App.tsxデータ復元修正
 対象: UnstockedCompare.tsx / App.tsx
 

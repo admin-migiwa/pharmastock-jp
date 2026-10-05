@@ -1,0 +1,452 @@
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  FileSpreadsheet, Upload, CheckCircle, AlertCircle, Info, Building2,
+  FileWarning, RefreshCw, BarChart3, AlertTriangle
+} from 'lucide-react';
+import readXlsxFile from 'read-excel-file/browser';
+import { supabase } from '../supabase';
+import { Store } from '../types';
+import { normalizeName, isValidYjCode } from '../shipmentMatch';
+
+interface ShipmentStatusImportProps {
+  storeId: string;
+  stores: Store[];
+}
+
+interface ParsedRow {
+  yj_code: string;
+  name: string;
+  name_key: string;
+  maker: string | null;
+  status: string;
+  status_date: string | null;
+  reason: string | null;
+  outlook: string | null;
+  outlook_detail: string | null;
+  volume_status: string | null;
+  volume_outlook: string | null;
+  volume_amount: string | null;
+  info_date: string | null;
+  is_new: boolean;
+  is_adjusting: boolean;
+}
+
+interface StoreReport {
+  storeName: string;
+  total: number;
+  code: number;
+  name: number;
+  dict: number;
+  ambiguous: number;
+  none: number;
+}
+
+const toStr = (v: any): string => {
+  if (v === null || v === undefined) return '';
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  return String(v).replace(/\r?\n/g, ' ').trim();
+};
+const toDateStr = (v: any): string | null => {
+  if (v instanceof Date && !isNaN(v.getTime())) return v.toISOString().slice(0, 10);
+  const s = toStr(v);
+  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : null;
+};
+const orNull = (v: any): string | null => {
+  const s = toStr(v);
+  return s === '' ? null : s;
+};
+
+// 出荷調整中か：⑫が通常出荷以外、または⑰が「A（出荷量通常／増加）」以外（減少・停止・薬価削除予定など）
+const judgeAdjusting = (status: string, volume: string | null): boolean => {
+  if (!status.includes('通常出荷')) return true;
+  if (volume && !/^A/.test(volume)) return true;
+  return false;
+};
+
+const parseWorkbook = async (file: File): Promise<ParsedRow[]> => {
+  const sheets: any = await readXlsxFile(file);
+  const data: any[][] = Array.isArray(sheets) && sheets[0]?.data ? sheets[0].data : sheets;
+
+  // ヘッダー行（「YJコード」を含む行）を探す
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(data.length, 15); i++) {
+    if ((data[i] || []).some(c => toStr(c).includes('YJコード'))) { headerIdx = i; break; }
+  }
+  if (headerIdx === -1) throw new Error('ヘッダー行（YJコード）が見つかりません。厚労省「医療用医薬品の供給状況」のExcelか確認してください。');
+
+  const headers = (data[headerIdx] || []).map(toStr);
+  // ①〜⑳の丸数字で列を特定（列順が変わっても、丸数字が維持されていれば追従できる）
+  const col = (circled: string) => headers.findIndex(h => h.startsWith(circled));
+  const idx = {
+    yj: col('⑤'), name: col('⑥'), maker: col('⑦'), status: col('⑫'), statusDate: col('⑬'),
+    reason: col('⑭'), outlook: col('⑮'), outlookDetail: col('⑯'), volume: col('⑰'),
+    volumeOutlook: col('⑱'), volumeAmount: col('⑲'), infoDate: col('⑳'),
+    isNew: headers.findIndex(h => h.includes('今回掲載時')),
+  };
+  const missing = (['yj', 'name', 'status'] as const).filter(k => idx[k] === -1);
+  if (missing.length > 0) {
+    throw new Error('必須列（⑤YJコード／⑥品名／⑫出荷対応の状況）が見つかりません。ファイル形式が変更された可能性があります。');
+  }
+
+  const map = new Map<string, ParsedRow>();
+  for (let i = headerIdx + 1; i < data.length; i++) {
+    const r = data[i] || [];
+    const yj = toStr(r[idx.yj]);
+    const status = toStr(r[idx.status]);
+    if (!yj || !status) continue;
+    const volume = idx.volume !== -1 ? orNull(r[idx.volume]) : null;
+    const name = toStr(r[idx.name]);
+    map.set(yj, {
+      yj_code: yj,
+      name,
+      name_key: normalizeName(name),
+      maker: idx.maker !== -1 ? orNull(r[idx.maker]) : null,
+      status,
+      status_date: idx.statusDate !== -1 ? toDateStr(r[idx.statusDate]) : null,
+      reason: idx.reason !== -1 ? orNull(r[idx.reason]) : null,
+      outlook: idx.outlook !== -1 ? orNull(r[idx.outlook]) : null,
+      outlook_detail: idx.outlookDetail !== -1 ? orNull(r[idx.outlookDetail]) : null,
+      volume_status: volume,
+      volume_outlook: idx.volumeOutlook !== -1 ? orNull(r[idx.volumeOutlook]) : null,
+      volume_amount: idx.volumeAmount !== -1 ? orNull(r[idx.volumeAmount]) : null,
+      info_date: idx.infoDate !== -1 ? toDateStr(r[idx.infoDate]) : null,
+      is_new: idx.isNew !== -1 ? toStr(r[idx.isNew]).toLowerCase() === 'new' : false,
+      is_adjusting: judgeAdjusting(status, volume),
+    });
+  }
+  return Array.from(map.values());
+};
+
+// Supabase は1回の取得が最大1000件のため、ページングで全件取得
+const fetchAll = async <T,>(table: string, columns: string): Promise<T[]> => {
+  const PAGE = 1000;
+  const all: T[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase.from(table).select(columns).range(from, from + PAGE - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    all.push(...(data as T[]));
+    if (data.length < PAGE) break;
+  }
+  return all;
+};
+
+const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, stores }) => {
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [parsed, setParsed] = useState<ParsedRow[] | null>(null);
+  const [isParsing, setIsParsing] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [progress, setProgress] = useState('');
+  const [message, setMessage] = useState('');
+  const [messageType, setMessageType] = useState<'success' | 'error' | 'info' | ''>('');
+  const [lastImport, setLastImport] = useState<{ at: string; file: string | null; count: number } | null>(null);
+  const [report, setReport] = useState<StoreReport[] | null>(null);
+  const [isReporting, setIsReporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const currentStoreName = stores.find(s => s.id === storeId)?.name || '未設定の店舗';
+
+  const loadLastImport = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('shipment_status')
+        .select('imported_at,source_file')
+        .order('imported_at', { ascending: false })
+        .limit(1);
+      if (error) throw error;
+      const { count } = await supabase.from('shipment_status').select('yj_code', { count: 'exact', head: true });
+      if (data && data.length > 0) setLastImport({ at: data[0].imported_at, file: data[0].source_file, count: count || 0 });
+      else setLastImport(null);
+    } catch {
+      setLastImport(null);
+    }
+  };
+
+  useEffect(() => { loadLastImport(); }, []);
+
+  const setMsg = (text: string, type: 'success' | 'error' | 'info' | '') => { setMessage(text); setMessageType(type); };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    setMsg('', '');
+    setParsed(null);
+    setReport(null);
+    const file = e.target.files?.[0];
+    if (!file) { setSelectedFile(null); return; }
+    if (!file.name.toLowerCase().endsWith('.xlsx')) {
+      setSelectedFile(null);
+      setMsg('.xlsx ファイルを選択してください。', 'error');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+    setSelectedFile(file);
+    setIsParsing(true);
+    setMsg('ファイルを解析しています（数秒かかります）...', 'info');
+    try {
+      const rows = await parseWorkbook(file);
+      if (rows.length === 0) throw new Error('有効なデータが見つかりませんでした。');
+      setParsed(rows);
+      setMsg(`${file.name} を解析しました。内容を確認して「取り込む」を押してください。`, 'info');
+    } catch (err) {
+      setSelectedFile(null);
+      setMsg(err instanceof Error ? err.message : '解析に失敗しました', 'error');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    } finally {
+      setIsParsing(false);
+    }
+  };
+
+  const handleImport = async () => {
+    if (!parsed || !selectedFile) return;
+    setIsLoading(true);
+    setMsg('', '');
+    try {
+      const importedAt = new Date().toISOString();
+      const BATCH = 1000;
+      // まず全件を upsert（途中で失敗しても既存データは消えない）
+      for (let i = 0; i < parsed.length; i += BATCH) {
+        setProgress(`保存中... ${Math.min(i + BATCH, parsed.length).toLocaleString()} / ${parsed.length.toLocaleString()} 件`);
+        const batch = parsed.slice(i, i + BATCH).map(r => ({ ...r, source_file: selectedFile.name, imported_at: importedAt }));
+        const { error } = await supabase.from('shipment_status').upsert(batch, { onConflict: 'yj_code' });
+        if (error) throw new Error(`保存に失敗しました（${i + 1}件目〜）: ${error.message}`);
+      }
+      // 全件の保存に成功したら、今回のファイルに含まれない古い行（掲載終了品目）を削除
+      setProgress('古いデータを整理中...');
+      const { error: delErr } = await supabase.from('shipment_status').delete().lt('imported_at', importedAt);
+      if (delErr) throw new Error(`古いデータの整理に失敗しました: ${delErr.message}`);
+
+      setMsg(`✓ 出荷状況を ${parsed.length.toLocaleString()} 件取り込みました`, 'success');
+      setSelectedFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      await loadLastImport();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '取り込みに失敗しました', 'error');
+    } finally {
+      setIsLoading(false);
+      setProgress('');
+    }
+  };
+
+  // 店舗別の突合率チェック（現在庫 realtime_stocks に対して実施）
+  const runReport = async () => {
+    setIsReporting(true);
+    setReport(null);
+    try {
+      const [ship, stocks] = await Promise.all([
+        fetchAll<{ yj_code: string; name_key: string }>('shipment_status', 'yj_code,name_key'),
+        fetchAll<{ store_id: string; name: string; yakka_code: string | null }>('realtime_stocks', 'store_id,name,yakka_code'),
+      ]);
+      if (ship.length === 0) throw new Error('出荷状況データがありません。先に取り込みを行ってください。');
+
+      const codeSet = new Set(ship.map(s => s.yj_code));
+      const nameCount = new Map<string, number>();
+      const nameToCode = new Map<string, string>();
+      ship.forEach(s => {
+        nameCount.set(s.name_key, (nameCount.get(s.name_key) || 0) + 1);
+        nameToCode.set(s.name_key, s.yj_code);
+      });
+      // 辞書：他店の在庫（有効なYJコードあり）から 名称→YJコード
+      const dict = new Map<string, string>();
+      stocks.forEach(s => { if (isValidYjCode(s.yakka_code)) dict.set(normalizeName(s.name), (s.yakka_code as string).trim()); });
+
+      const byStore = new Map<string, StoreReport>();
+      stocks.forEach(s => {
+        const st = byStore.get(s.store_id) || {
+          storeName: stores.find(x => x.id === s.store_id)?.name || '不明',
+          total: 0, code: 0, name: 0, dict: 0, ambiguous: 0, none: 0,
+        };
+        st.total++;
+        const code = (s.yakka_code || '').trim();
+        const key = normalizeName(s.name);
+        const cnt = nameCount.get(key) || 0;
+        if (isValidYjCode(code) && codeSet.has(code)) st.code++;
+        else if (cnt === 1) st.name++;
+        else if (cnt > 1) st.ambiguous++;
+        else if (dict.has(key) && codeSet.has(dict.get(key)!)) st.dict++;
+        else st.none++;
+        byStore.set(s.store_id, st);
+      });
+      setReport(Array.from(byStore.values()));
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '突合率チェックに失敗しました', 'error');
+    } finally {
+      setIsReporting(false);
+    }
+  };
+
+  const summary = parsed ? {
+    total: parsed.length,
+    normal: parsed.filter(r => !r.is_adjusting).length,
+    adjusting: parsed.filter(r => r.is_adjusting).length,
+    stop: parsed.filter(r => r.status.includes('供給停止')).length,
+    limited: parsed.filter(r => r.status.includes('限定出荷')).length,
+    reduced: parsed.filter(r => r.volume_status && !/^A/.test(r.volume_status)).length,
+  } : null;
+
+  const pct = (n: number, t: number) => (t === 0 ? '-' : `${Math.round((n / t) * 100)}%`);
+
+  return (
+    <div className="w-full max-w-4xl mx-auto p-6 space-y-6 animate-in fade-in">
+      <div className="flex items-center justify-between border-b pb-6 border-slate-200">
+        <div>
+          <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3">
+            <FileSpreadsheet className="w-8 h-8 text-blue-600" />
+            出荷状況インポート
+          </h1>
+          <p className="text-slate-500 text-sm font-bold mt-1 uppercase tracking-wider">Shipment Status Import</p>
+        </div>
+        <div className="bg-slate-900 text-white px-6 py-3 rounded-2xl flex items-center gap-3 shadow-lg">
+          <Building2 className="w-5 h-5 text-blue-400" />
+          <span className="text-sm font-black">{currentStoreName}</span>
+        </div>
+      </div>
+
+      {/* 現在の取込状況 */}
+      <div className="bg-white border-2 border-slate-100 rounded-[24px] p-5 flex flex-wrap items-center gap-x-8 gap-y-2 text-xs font-bold text-slate-600">
+        <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">現在のデータ</div>
+        {lastImport ? (
+          <>
+            <div>取込日時：<span className="text-slate-900">{new Date(lastImport.at).toLocaleString('ja-JP')}</span></div>
+            <div>件数：<span className="text-slate-900">{lastImport.count.toLocaleString()}件</span></div>
+            <div className="truncate max-w-xs">ファイル：<span className="text-slate-900">{lastImport.file || '-'}</span></div>
+          </>
+        ) : (
+          <div className="text-slate-400">まだ取り込まれていません（または shipment_status テーブルが未作成です）</div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="md:col-span-2 space-y-4">
+          <div className={`relative border-4 border-dashed rounded-[32px] p-10 transition-all flex flex-col items-center justify-center text-center ${
+            selectedFile ? 'bg-blue-50 border-blue-400' : 'bg-white border-slate-200 hover:border-blue-300'
+          }`}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx"
+              onChange={handleFileChange}
+              disabled={isLoading || isParsing}
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
+            />
+            <div className={`p-5 rounded-3xl mb-4 ${selectedFile ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
+              <FileSpreadsheet size={40} />
+            </div>
+            <h3 className="text-lg font-black text-slate-800">
+              {selectedFile ? selectedFile.name : '供給状況のExcelをドロップ'}
+            </h3>
+            <p className="text-xs text-slate-400 font-bold mt-2">厚労省「医療用医薬品の供給状況」 .xlsx</p>
+          </div>
+
+          {message && (
+            <div className={`p-4 rounded-2xl flex items-center gap-3 border-2 ${
+              messageType === 'success' ? 'bg-green-50 border-green-200 text-green-700' :
+              messageType === 'error' ? 'bg-red-50 border-red-200 text-red-700' :
+              'bg-blue-50 border-blue-200 text-blue-700'
+            }`}>
+              {messageType === 'success' ? <CheckCircle size={20} /> :
+               messageType === 'error' ? <AlertCircle size={20} /> : <Info size={20} />}
+              <span className="text-sm font-bold">{message}</span>
+            </div>
+          )}
+
+          {summary && (
+            <div className="bg-white border-2 border-slate-100 rounded-[24px] p-5">
+              <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">解析結果（取込前の確認）</div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-center">
+                <div className="bg-slate-50 rounded-xl p-3"><div className="text-xl font-black text-slate-800">{summary.total.toLocaleString()}</div><div className="text-[10px] font-bold text-slate-400">全品目</div></div>
+                <div className="bg-slate-50 rounded-xl p-3"><div className="text-xl font-black text-slate-800">{summary.normal.toLocaleString()}</div><div className="text-[10px] font-bold text-slate-400">通常</div></div>
+                <div className="bg-amber-50 rounded-xl p-3"><div className="text-xl font-black text-amber-700">{summary.adjusting.toLocaleString()}</div><div className="text-[10px] font-bold text-amber-600">出荷調整中</div></div>
+                <div className="bg-red-50 rounded-xl p-3"><div className="text-xl font-black text-red-600">{summary.stop.toLocaleString()}</div><div className="text-[10px] font-bold text-red-500">供給停止</div></div>
+                <div className="bg-amber-50 rounded-xl p-3"><div className="text-xl font-black text-amber-700">{summary.limited.toLocaleString()}</div><div className="text-[10px] font-bold text-amber-600">限定出荷</div></div>
+                <div className="bg-orange-50 rounded-xl p-3"><div className="text-xl font-black text-orange-600">{summary.reduced.toLocaleString()}</div><div className="text-[10px] font-bold text-orange-500">出荷量 減少・停止等</div></div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-4">
+          <button
+            onClick={handleImport}
+            disabled={!parsed || isLoading || isParsing}
+            className={`w-full h-32 rounded-[32px] flex flex-col items-center justify-center gap-2 transition-all shadow-xl active:scale-95 ${
+              !parsed || isLoading || isParsing
+                ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                : 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-200'
+            }`}
+          >
+            {isLoading || isParsing ? <RefreshCw className="animate-spin" size={32} /> : <Upload size={32} />}
+            <span className="font-black text-lg">取り込む</span>
+            {progress && <span className="text-[10px] font-bold">{progress}</span>}
+          </button>
+
+          <div className="bg-amber-50 border border-amber-200 p-5 rounded-[24px]">
+            <div className="flex items-center gap-2 text-amber-700 mb-2 font-black text-xs">
+              <FileWarning size={16} />
+              <span>注意点</span>
+            </div>
+            <ul className="text-[11px] text-amber-800 font-bold space-y-2 leading-relaxed">
+              <li>• 出荷状況は全店共通です。最新のファイルで内容が置き換わります。</li>
+              <li>• 今回のファイルに載っていない品目は削除されます。</li>
+              <li>• 在庫データには影響しません。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      {/* 突合率チェック */}
+      <div className="bg-white border-2 border-slate-100 rounded-[24px] p-6 space-y-4">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-sm font-black text-slate-800 flex items-center gap-2"><BarChart3 size={16} className="text-blue-600" />店舗別 突合率チェック</h2>
+            <p className="text-[11px] text-slate-400 font-bold mt-1">各店舗の現在庫が、出荷状況データとどれだけ照合できているかを確認します。</p>
+          </div>
+          <button
+            onClick={runReport}
+            disabled={isReporting}
+            className="px-5 py-2.5 rounded-xl bg-slate-900 text-white font-black text-xs hover:bg-slate-700 transition-all disabled:opacity-50 flex items-center gap-2"
+          >
+            {isReporting ? <RefreshCw size={14} className="animate-spin" /> : <BarChart3 size={14} />}
+            チェックを実行
+          </button>
+        </div>
+        {report && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-bold text-slate-600">
+              <thead>
+                <tr className="text-[10px] text-slate-400 uppercase tracking-widest border-b border-slate-100">
+                  <th className="text-left py-2">店舗</th>
+                  <th className="text-right py-2">在庫品目</th>
+                  <th className="text-right py-2">コード一致</th>
+                  <th className="text-right py-2">名称一致</th>
+                  <th className="text-right py-2">辞書補完</th>
+                  <th className="text-right py-2 text-amber-600">要確認</th>
+                  <th className="text-right py-2">情報なし</th>
+                  <th className="text-right py-2">一致率</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {report.map(r => (
+                  <tr key={r.storeName}>
+                    <td className="py-2 text-slate-800">{r.storeName}</td>
+                    <td className="py-2 text-right tabular-nums">{r.total.toLocaleString()}</td>
+                    <td className="py-2 text-right tabular-nums">{r.code.toLocaleString()}</td>
+                    <td className="py-2 text-right tabular-nums">{r.name.toLocaleString()}</td>
+                    <td className="py-2 text-right tabular-nums">{r.dict.toLocaleString()}</td>
+                    <td className="py-2 text-right tabular-nums text-amber-600">{r.ambiguous.toLocaleString()}</td>
+                    <td className="py-2 text-right tabular-nums text-slate-400">{r.none.toLocaleString()}</td>
+                    <td className="py-2 text-right tabular-nums text-blue-600 font-black">{pct(r.code + r.name + r.dict, r.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[10px] text-slate-400 font-bold mt-3 flex items-start gap-1">
+              <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
+              「情報なし」には、厚労省の一覧に載っていない品目（医療材料・未収載品・一般用など）も含まれます。
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default ShipmentStatusImport;
