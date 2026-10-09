@@ -23,7 +23,9 @@ import {
   ShieldCheck,
   ListFilter,
   CheckSquare,
-  Square
+  Square,
+  Download,
+  Printer
 } from 'lucide-react';
 import { Store, Order, OrderStatus, IgnoredOrderItem, ShipmentLookup } from '../types';
 import { supabase } from '../supabase';
@@ -316,6 +318,195 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     } catch (err: any) {
       alert(`除外解除に失敗しました: ${err.message}`);
     }
+  };
+
+  // CSV出力（現在表示・フィルタ中の照合データをCSV保存）
+  const handleExportCsv = () => {
+    if (filteredOrders.length === 0) {
+      alert('出力対象のデータがありません');
+      return;
+    }
+
+    const headers = [
+      '発注日',
+      '納品指定日',
+      '実際の入庫日',
+      '薬品名',
+      '規格',
+      'メーカー',
+      'JANコード',
+      '発注先卸',
+      '発注数量',
+      '納入数量',
+      '納品ステータス',
+      '納期遅延状況',
+      '厚労省供給調整状況',
+      '除外設定'
+    ];
+
+    const rows = filteredOrders.map(ord => {
+      const delayBadge = getDelayBadge(ord);
+      const shipmentLk = shipmentMap.get(ord.id);
+      const shipmentBadge = shipmentLk ? getShipmentBadge(shipmentLk.rows) : null;
+      const alreadyIgnored = isAlreadyIgnored(ord) || ord.status === 'cancelled';
+
+      const statusText = 
+        ord.status === 'fulfilled' ? '着荷完納' :
+        ord.status === 'partial' ? '一部着荷' :
+        ord.status === 'delayed' ? '納期遅延' :
+        ord.status === 'cancelled' ? '管理対象外' : '未納品';
+
+      return [
+        ord.order_date || '',
+        ord.delivery_date || '',
+        ord.actual_delivery_date || '',
+        ord.name || '',
+        ord.spec || '',
+        ord.maker || '',
+        ord.jan_code || '',
+        ord.supplier || '',
+        ord.order_qty,
+        ord.delivered_qty,
+        statusText,
+        alreadyIgnored ? '一般除外品' : delayBadge.label,
+        shipmentBadge ? shipmentBadge.label : '通常出荷/データなし',
+        alreadyIgnored ? '除外設定済み' : '対象'
+      ];
+    });
+
+    const csvContent = '\uFEFF' + [
+      headers.join(','),
+      ...rows.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(','))
+    ].join('\r\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const storeName = currentStore?.name || '店舗';
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    a.download = `発注未納品照合データ_${storeName}_${dateStr}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // PDF / 印刷出力
+  const handlePrint = () => {
+    if (filteredOrders.length === 0) {
+      alert('印刷対象のデータがありません');
+      return;
+    }
+
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert('ポップアップブロックを解除してください');
+      return;
+    }
+
+    const storeName = currentStore?.name || '店舗';
+    const today = new Date().toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' });
+
+    const rowsHtml = filteredOrders.map(ord => {
+      const delayBadge = getDelayBadge(ord);
+      const shipmentLk = shipmentMap.get(ord.id);
+      const shipmentBadge = shipmentLk ? getShipmentBadge(shipmentLk.rows) : null;
+      const alreadyIgnored = isAlreadyIgnored(ord) || ord.status === 'cancelled';
+
+      const statusText = 
+        ord.status === 'fulfilled' ? '着荷完納' :
+        ord.status === 'partial' ? '一部着荷' :
+        ord.status === 'delayed' ? '納期遅延' :
+        ord.status === 'cancelled' ? '管理対象外' : '未納品';
+
+      return `
+        <tr>
+          <td>${ord.order_date}<br/><span style="color:#64748b;font-size:10px;">指定:${ord.delivery_date}</span></td>
+          <td style="font-weight:bold;">${ord.name}<br/><span style="color:#64748b;font-size:10px;">${ord.spec || ''} ${ord.maker ? '(' + ord.maker + ')' : ''}</span></td>
+          <td style="font-family:monospace;">${ord.jan_code}</td>
+          <td>${ord.supplier || '-'}</td>
+          <td style="text-align:center;font-weight:bold;">${ord.delivered_qty} / ${ord.order_qty}</td>
+          <td>${alreadyIgnored ? '一般除外品' : statusText + ' (' + delayBadge.label + ')'}</td>
+          <td>${shipmentBadge ? shipmentBadge.label : '通常出荷'}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8"/>
+        <title>発注・未納品 照合データ報告書 - ${storeName}</title>
+        <style>
+          @page { size: A4 landscape; margin: 10mm; }
+          body { font-family: "Helvetica Neue", Arial, "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif; font-size: 11px; color: #0f172a; margin: 0; padding: 0; }
+          .header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #0f172a; padding-bottom: 8px; margin-bottom: 12px; }
+          .title { font-size: 18px; font-weight: bold; color: #0f172a; }
+          .sub { font-size: 11px; color: #475569; }
+          .meta { text-align: right; font-size: 11px; }
+          .summary-box { display: flex; gap: 20px; background: #f8fafc; border: 1px solid #cbd5e1; padding: 8px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 11px; font-weight: bold; }
+          table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+          th { background: #1e293b; color: #ffffff; padding: 6px 8px; text-align: left; font-size: 10px; border: 1px solid #0f172a; }
+          td { padding: 6px 8px; border-bottom: 1px solid #cbd5e1; border-right: 1px solid #e2e8f0; border-left: 1px solid #e2e8f0; font-size: 10px; }
+          tr:nth-child(even) { background-color: #f8fafc; }
+          @media print {
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div>
+            <div class="title">発注・未納品 照合結果報告書</div>
+            <div class="sub">対象店舗: ${storeName}</div>
+          </div>
+          <div class="meta">
+            <div>出力日: ${today}</div>
+            <div>対象件数: ${filteredOrders.length} 件</div>
+          </div>
+        </div>
+
+        <div class="summary-box">
+          <div>全発注数: ${stats.total}件</div>
+          <div>未納品・遅延: <span style="color:#e11d48;">${stats.unfulfilledCount}件</span></div>
+          <div>納期遅延: ${stats.delayed}件</div>
+          <div>厚労省出荷調整対象: <span style="color:#7c3aed;">${stats.adjustingCount}件</span></div>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th style="width:13%;">発注日 / 指定日</th>
+              <th style="width:30%;">薬品名 / 規格 / メーカー</th>
+              <th style="width:13%;">JANコード</th>
+              <th style="width:12%;">発注先卸</th>
+              <th style="width:10%;text-align:center;">納入/発注</th>
+              <th style="width:12%;">納品状態 / 遅延</th>
+              <th style="width:10%;">出荷調整</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+
+        <script>
+          window.onload = () => {
+            setTimeout(() => {
+              window.print();
+            }, 300);
+          };
+        </script>
+      </body>
+      </html>
+    `;
+
+    printWindow.document.open();
+    printWindow.document.write(htmlContent);
+    printWindow.document.close();
   };
 
   // CSVインポート処理
@@ -706,6 +897,27 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               <span>照合実行</span>
             </button>
           </div>
+
+          {/* 出力ボタン群 */}
+          <button
+            onClick={handleExportCsv}
+            disabled={filteredOrders.length === 0}
+            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/40 text-xs font-bold px-3.5 py-2.5 rounded-xl shadow transition-all disabled:opacity-40"
+            title="現在表示・フィルタ中の照合データをCSV出力"
+          >
+            <Download className="w-4 h-4 text-emerald-400" />
+            <span>CSV出力</span>
+          </button>
+
+          <button
+            onClick={handlePrint}
+            disabled={filteredOrders.length === 0}
+            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-sky-300 border border-sky-500/40 text-xs font-bold px-3.5 py-2.5 rounded-xl shadow transition-all disabled:opacity-40"
+            title="照合結果をPDF/印刷出力"
+          >
+            <Printer className="w-4 h-4 text-sky-400" />
+            <span>PDF / 印刷</span>
+          </button>
         </div>
       </div>
 
