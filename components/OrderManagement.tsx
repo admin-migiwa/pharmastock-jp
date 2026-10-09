@@ -21,7 +21,9 @@ import {
   EyeOff,
   PlusCircle,
   ShieldCheck,
-  ListFilter
+  ListFilter,
+  CheckSquare,
+  Square
 } from 'lucide-react';
 import { Store, Order, OrderStatus, IgnoredOrderItem, ShipmentLookup } from '../types';
 import { supabase } from '../supabase';
@@ -48,6 +50,10 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
   const [uploadMessage, setUploadMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [selectedOrderForDetail, setSelectedOrderForDetail] = useState<{ order: Order; shipment?: ShipmentLookup } | null>(null);
   const [showIgnoredMasterModal, setShowIgnoredMasterModal] = useState<boolean>(false);
+
+  // 一括除外確認モーダル用ステート
+  const [showCandidateModal, setShowCandidateModal] = useState<boolean>(false);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(new Set());
 
   const currentStore = stores.find(s => s.id === currentStoreId);
 
@@ -109,31 +115,21 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     fetchOrders();
   }, [currentStoreId]);
 
-  // 除外候補判定ヘルパー（一般用品・OTC医薬品・検査薬・雑品のみ判定）
-  const isExclusionCandidate = (ord: Order): boolean => {
+  // 除外候補判定ヘルパー（一般用品・OTC医薬品・検査薬・雑品等の広域判定）
+  const isExclusionCandidate = (ord: Order, lookup?: ShipmentLookup): boolean => {
     const name = ord.name || '';
 
-    // 1. 医療用医薬品のメーカー表記「トーワ」「サワイ」等や特定成分・規格が含まれるものは保護
-    const hasEthicalMakerTag = /「[ァ-ヴ一-龠a-zA-Z0-9]+」/.test(name);
-    // 2. 医療用医薬品に特有の標準剤形・単位表現（錠, カプセル, 散, 軟膏, 点眼液 等）
-    const hasEthicalDosage = /錠|カプセル|散|細粒|顆粒|シロップ|ドライシロップ|ＤＳ|DS|軟膏|クリーム|ローション|テープ|パッチ|点眼|点耳|点鼻|吸入|注射|坐剤|ＯＤ錠|OD錠/;
+    // 1. OTC医薬品・検査薬・自費品・一般用医薬品の包括的キーワード
+    const otcRegex = /ノルレボ|エラワン|チェックワン|ドゥーテスト|ハイテスター|妊娠|排卵|自費|OTC|一般用|テストキット|検査薬|第[1１2２3３]類|類医薬品|指定第|外用薬|消毒液|マスク|サプリ|栄養|食品|化粧|資生堂|カネボウ|コーセー|ロート|アラクス|パブロン|新ルル|ルル|ガスター|ロキソニンS|ロキソニンＳ|アレグラFX|アレグラＦＸ|リアップ|チョコラ|アリナミン|ビオフェルミン|太田胃散|キャベジン/i;
+    if (otcRegex.test(name)) return true;
 
-    // ノルレボ・チェックワン・OTC医薬品・検査薬・雑貨に特化した高精度キーワード
-    const specificOtcKeywords = /ノルレボ|エラワン|チェックワン|ドゥーテスト|ハイテスター|排卵日|妊娠検査|自費|OTC|一般用|テストキット|検査薬|第[1１2２3３]類|類医薬品|指定第|外用薬|消毒液|マスク|サプリ|栄養|食品|化粧|資生堂|カネボウ|コーセー|ロート|アラクス|パブロン|新ルル|ルル|ガスター10|ガスター１０|ロキソニンS|ロキソニンＳ|アレグラFX|アレグラＦＸ|リアップ|チョコラ|アリナミン|ビオフェルミン|太田胃散|キャベジン/i;
-
-    // 明示的なOTC・自費品キーワードに一致する場合
-    if (specificOtcKeywords.test(name)) {
-      // ノルレボ、チェックワン、第N類医薬品、自費、OTC等は剤形に関わらず候補
-      if (/ノルレボ|エラワン|チェックワン|ドゥーテスト|ハイテスター|自費|OTC|第[1１2２3３]類|類医薬品|指定第/i.test(name)) {
-        return true;
-      }
-      // それ以外のキーワードで医療用メーカー表記「...」があれば医療用医薬品として保護
-      if (!hasEthicalMakerTag) {
-        return true;
-      }
+    // 2. 厚労省の医療用医薬品マスタ（shipment_status）に一切ヒットしない商品 (kind === 'none')
+    // 薬価削除品や非医療用品は kind === 'none' になります
+    if (lookup && lookup.kind === 'none') {
+      const isValidYj = /^[0-9A-Za-z]{12}$/.test((ord.yakka_code || ord.jan_code || '').trim());
+      if (!isValidYj) return true;
     }
 
-    // キンダベート、EPL、サンテなど過去・削除済みの医療用医薬品は一般品と誤認めないよう安全に保護
     return false;
   };
 
@@ -145,47 +141,67 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     );
   };
 
-  // 表示中の除外候補を一括登録
-  const handleBulkAddToIgnored = async () => {
+  // 除外候補の一括確認モーダルを開く
+  const handleOpenCandidateModal = () => {
     const candidateOrders = orders.filter(o => 
       o.status !== 'cancelled' && 
       !isAlreadyIgnored(o) && 
-      isExclusionCandidate(o)
+      isExclusionCandidate(o, shipmentMap.get(o.id))
     );
 
-    if (candidateOrders.length === 0) {
-      alert('一括除外する候補がありません');
+    const initialSet = new Set(candidateOrders.map(o => o.id));
+    setSelectedCandidateIds(initialSet);
+    setShowCandidateModal(true);
+  };
+
+  // 一括除外の確定処理
+  const handleConfirmCandidateExclusion = async () => {
+    if (selectedCandidateIds.size === 0) {
+      alert('除外対象として選択された商品がありません');
       return;
     }
 
-    if (!window.confirm(`表示中の除外候補 ${candidateOrders.length} 件をすべて今後自動除外するマスタに登録しますか？`)) {
+    const targetOrders = orders.filter(o => selectedCandidateIds.has(o.id));
+
+    if (!window.confirm(`選択した ${targetOrders.length} 件を今後自動除外するマスタに登録し、対象外として確定しますか？`)) {
       return;
     }
 
     try {
-      const newItems = candidateOrders.map(o => ({
-        store_id: currentStoreId,
-        jan_code: o.jan_code || null,
-        name: o.name,
-        name_key: o.name_key || normalizeName(o.name),
-        reason: '一般品・OTC・検査薬（一括除外）',
-        created_at: new Date().toISOString()
-      }));
+      // 重複を除いてマスタ登録用の配列を作成
+      const uniqueItemsMap = new Map<string, any>();
+      targetOrders.forEach(o => {
+        const key = o.jan_code || o.name_key || o.name;
+        if (!uniqueItemsMap.has(key)) {
+          uniqueItemsMap.set(key, {
+            store_id: currentStoreId,
+            jan_code: o.jan_code || null,
+            name: o.name,
+            name_key: o.name_key || normalizeName(o.name),
+            reason: '一般品・OTC・検査薬（確認一括除外）',
+            created_at: new Date().toISOString()
+          });
+        }
+      });
 
-      const { error } = await supabase.from('ignored_order_items').insert(newItems);
-      if (error) throw error;
+      const newItems = Array.from(uniqueItemsMap.values());
+      const { error: insertErr } = await supabase.from('ignored_order_items').insert(newItems);
+      if (insertErr) throw insertErr;
 
-      const ids = candidateOrders.map(o => o.id);
-      await supabase.from('orders').update({ status: 'cancelled' }).in('id', ids);
+      // 該当発注レコードのステータスを cancelled に更新
+      const targetIds = Array.from(selectedCandidateIds);
+      const { error: updateErr } = await supabase.from('orders').update({ status: 'cancelled' }).in('id', targetIds);
+      if (updateErr) throw updateErr;
 
-      setUploadMessage({ type: 'success', text: `${candidateOrders.length} 件の一般品・OTC品を除外マスタに一括登録しました` });
+      setUploadMessage({ type: 'success', text: `${newItems.length} 品目を自動除外マスタに登録し、発注一覧から対象外に更新しました` });
+      setShowCandidateModal(false);
       await fetchOrders();
     } catch (err: any) {
-      alert(`一括登録失敗: ${err.message}`);
+      alert(`除外登録失敗: ${err.message}`);
     }
   };
 
-  // 除外マスタへ追加
+  // 単品での除外マスタ追加
   const handleAddToIgnored = async (order: Order, reason = '一般品・自費品（管理対象外）') => {
     if (!currentStoreId) return;
     try {
@@ -202,7 +218,6 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       const { error } = await supabase.from('ignored_order_items').insert([newItem]);
       if (error) throw error;
 
-      // 該当発注レコードのステータスを cancelled (除外) に更新
       await supabase.from('orders').update({ status: 'cancelled' }).eq('id', order.id);
 
       setUploadMessage({ type: 'success', text: `「${order.name}」を今後自動除外するマスタに登録しました` });
@@ -237,7 +252,6 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     setLoading(true);
     setUploadMessage(null);
 
-    // 既存データ取得
     const { data: existingDbOrders } = await supabase
       .from('orders')
       .select('*')
@@ -245,7 +259,6 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
     const existingPool = [...((existingDbOrders as Order[]) || [])];
 
-    // 除外マスタ最新取得
     const { data: latestIgnored } = await supabase
       .from('ignored_order_items')
       .select('*')
@@ -267,7 +280,6 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
         const inserts: Omit<Order, 'id'>[] = [];
 
         parsedRows.forEach(r => {
-          // 除外マスタに該当するか判定
           const isIgnoredByMaster = ignoredList.some(ig => 
             (ig.jan_code && ig.jan_code === r.jan_code) ||
             (ig.name_key && ig.name_key === r.name_key)
@@ -463,7 +475,8 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
       // 除外候補フィルタ
       if (statusFilter === 'candidate') {
-        if (!isExclusionCandidate(ord) || ord.status === 'cancelled') return false;
+        const lk = shipmentMap.get(ord.id);
+        if (!isExclusionCandidate(ord, lk) || ord.status === 'cancelled') return false;
         return true;
       }
 
@@ -506,7 +519,8 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
     let candidateCount = 0;
     activeOrders.forEach(o => {
-      if (isExclusionCandidate(o)) candidateCount++;
+      const lk = shipmentMap.get(o.id);
+      if (isExclusionCandidate(o, lk)) candidateCount++;
     });
 
     let adjustingCount = 0;
@@ -517,6 +531,15 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
     return { total, unfulfilledCount, pending, delayed, partial, fulfilled, candidateCount, adjustingCount };
   }, [orders, shipmentMap]);
+
+  // モーダル用候補オーダー一覧
+  const candidateOrders = useMemo(() => {
+    return orders.filter(o => 
+      o.status !== 'cancelled' && 
+      !isAlreadyIgnored(o) && 
+      isExclusionCandidate(o, shipmentMap.get(o.id))
+    );
+  }, [orders, shipmentMap, ignoredItems]);
 
   // ページネーション
   const totalPages = Math.ceil(filteredOrders.length / itemsPerPage) || 1;
@@ -714,13 +737,13 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               <span>出荷調整中のみ ({stats.adjustingCount})</span>
             </button>
 
-            {statusFilter === 'candidate' && stats.candidateCount > 0 && (
+            {stats.candidateCount > 0 && (
               <button
-                onClick={handleBulkAddToIgnored}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl bg-amber-600 hover:bg-amber-500 text-white shadow transition-all"
+                onClick={handleOpenCandidateModal}
+                className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-amber-600 hover:bg-amber-500 text-white shadow transition-all transform hover:scale-105"
               >
                 <ShieldAlert className="w-4 h-4" />
-                <span>候補 {stats.candidateCount} 件をすべて除外マスタに一括登録</span>
+                <span>除外候補を確認・一括選択 ({stats.candidateCount}件)</span>
               </button>
             )}
           </div>
@@ -758,7 +781,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                     const delayBadge = getDelayBadge(ord);
                     const shipmentLk = shipmentMap.get(ord.id);
                     const shipmentBadge = shipmentLk ? getShipmentBadge(shipmentLk.rows) : null;
-                    const candidate = isExclusionCandidate(ord);
+                    const candidate = isExclusionCandidate(ord, shipmentLk);
                     const alreadyIgnored = isAlreadyIgnored(ord) || ord.status === 'cancelled';
 
                     return (
@@ -945,6 +968,138 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
           </>
         )}
       </div>
+
+      {/* 除外候補の確認・一括登録モーダル */}
+      {showCandidateModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-5 text-slate-200">
+            <div className="flex items-start justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-6 h-6 text-amber-400" />
+                <div>
+                  <h3 className="text-lg font-black text-white">除外候補の目視確認・一括設定</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    一般品・OTC・検査薬等の候補です。除外したくない医薬品（キンダベート・EPL等）はチェックを外してください。
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowCandidateModal(false)}
+                className="text-slate-400 hover:text-white font-bold p-1 rounded-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* チェック一括操作 */}
+            <div className="flex items-center justify-between bg-slate-800/80 p-3 rounded-xl border border-slate-700/60 text-xs font-bold">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    if (selectedCandidateIds.size === candidateOrders.length) {
+                      setSelectedCandidateIds(new Set());
+                    } else {
+                      setSelectedCandidateIds(new Set(candidateOrders.map(o => o.id)));
+                    }
+                  }}
+                  className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-white transition-colors"
+                >
+                  {selectedCandidateIds.size === candidateOrders.length ? (
+                    <>
+                      <CheckSquare className="w-4 h-4 text-emerald-400" />
+                      <span>すべて解除</span>
+                    </>
+                  ) : (
+                    <>
+                      <Square className="w-4 h-4 text-slate-400" />
+                      <span>全選択</span>
+                    </>
+                  )}
+                </button>
+                <span className="text-slate-400">
+                  全 {candidateOrders.length} 件中 <span className="text-amber-300 font-bold">{selectedCandidateIds.size}</span> 件を選択中
+                </span>
+              </div>
+            </div>
+
+            {/* 候補商品一覧テーブル */}
+            <div className="max-h-[380px] overflow-y-auto custom-scrollbar border border-slate-800 rounded-xl">
+              <table className="w-full text-left text-xs text-slate-200">
+                <thead className="bg-slate-800/90 text-slate-300 font-bold sticky top-0 border-b border-slate-700">
+                  <tr>
+                    <th className="py-2.5 px-3 text-center w-12">除外</th>
+                    <th className="py-2.5 px-3">商品名</th>
+                    <th className="py-2.5 px-3">JANコード</th>
+                    <th className="py-2.5 px-3">検出理由</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/50">
+                  {candidateOrders.map(ord => {
+                    const isChecked = selectedCandidateIds.has(ord.id);
+                    const lk = shipmentMap.get(ord.id);
+                    const isOtcKeyword = /ノルレボ|チェックワン|妊娠|排卵|自費|OTC|一般用|テストキット|検査薬|第[1１2２3３]類/i.test(ord.name);
+
+                    return (
+                      <tr 
+                        key={ord.id}
+                        onClick={() => {
+                          const next = new Set(selectedCandidateIds);
+                          if (isChecked) next.delete(ord.id);
+                          else next.add(ord.id);
+                          setSelectedCandidateIds(next);
+                        }}
+                        className={`cursor-pointer transition-colors ${isChecked ? 'bg-amber-950/20 hover:bg-amber-950/30' : 'hover:bg-slate-800/40 opacity-70'}`}
+                      >
+                        <td className="py-2.5 px-3 text-center">
+                          {isChecked ? (
+                            <CheckSquare className="w-4 h-4 text-amber-400 mx-auto" />
+                          ) : (
+                            <Square className="w-4 h-4 text-slate-500 mx-auto" />
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 font-bold text-white">
+                          {ord.name}
+                        </td>
+                        <td className="py-2.5 px-3 font-mono text-slate-400">
+                          {ord.jan_code}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-400">
+                          {isOtcKeyword ? (
+                            <span className="text-amber-300 font-semibold">一般品・OTC・検査薬キーワード検出</span>
+                          ) : lk && lk.kind === 'none' ? (
+                            <span className="text-slate-400">厚労省医療用医薬品マスタ非掲載品</span>
+                          ) : (
+                            <span>除外候補</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* モーダルアクション */}
+            <div className="flex justify-between items-center border-t border-slate-800 pt-4">
+              <button
+                onClick={() => setShowCandidateModal(false)}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs px-5 py-2.5 rounded-xl border border-slate-700"
+              >
+                キャンセル
+              </button>
+
+              <button
+                onClick={handleConfirmCandidateExclusion}
+                disabled={selectedCandidateIds.size === 0}
+                className="bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs px-6 py-2.5 rounded-xl shadow-lg transition-all disabled:opacity-50 flex items-center gap-2"
+              >
+                <ShieldAlert className="w-4 h-4" />
+                <span>選択した {selectedCandidateIds.size} 件を確定して除外マスタに登録</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 除外マスタ設定モーダル */}
       {showIgnoredMasterModal && (
