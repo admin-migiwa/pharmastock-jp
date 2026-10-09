@@ -143,7 +143,7 @@ export const getDelayBadge = (order: Order): DelayBadgeInfo => {
     const days = order.delay_days ?? diffDays(order.actual_delivery_date, order.delivery_date);
     if (days === 0) return { label: '定刻 (±0日)', level: 'on_time', days };
     if (days > 0 && days <= 2) return { label: `+${days}日遅れ`, level: 'slight_delay', days };
-    if (days > 2) return { label: `+${days}日遅れ (調整疑い)`, level: 'severe_delay', days };
+    if (days > 2) return { label: `+${days}日遅れ (他店分譲/調整疑い)`, level: 'severe_delay', days };
     return { label: `${days}日 (早納)`, level: 'early', days };
   }
 
@@ -156,7 +156,7 @@ export const getDelayBadge = (order: Order): DelayBadgeInfo => {
 };
 
 /**
- * 発注と入庫履歴（purchase_history）の消し込みロジック (FIFO順アロケーション)
+ * 発注と入庫履歴（purchase_history）の消し込みロジック (2段階卸優先・FIFOアロケーション)
  */
 export const reconcileOrders = async (storeId: string, marginDays = 7) => {
   const { data: allOrders, error: orderErr } = await supabase
@@ -179,7 +179,7 @@ export const reconcileOrders = async (storeId: string, marginDays = 7) => {
   if (purErr) throw purErr;
   const purList = purchases || [];
 
-  // 入庫履歴をプールに変換（箱数単位への換算 + 残数トラッキング）
+  // 入庫履歴をプールに変換（箱数単位への換算 + 残数トラッキング + 卸名保持）
   const purchasePool = purList.map(p => {
     const q = Number(p.quantity) || 1;
     let boxes = 1;
@@ -200,6 +200,7 @@ export const reconcileOrders = async (storeId: string, marginDays = 7) => {
       purchase_date: p.purchase_date,
       jan_code: normalizeJanCode(p.yakka_code || (p as any).jan_code),
       name_key: normalizeName(p.name),
+      supplier: (p as any).supplier || (p as any).wholesaler || (p as any).source || null,
       available_boxes: boxes,
     };
   });
@@ -217,12 +218,36 @@ export const reconcileOrders = async (storeId: string, marginDays = 7) => {
     let allocatedBoxQty = 0;
     let firstDelivDate: string | null = null;
 
+    // 1st Pass: 同一卸からの正規納品を優先割り当て (発注先卸名一致)
     for (const poolItem of purchasePool) {
       if (needed <= 0) break;
       if (poolItem.available_boxes <= 0) continue;
       if (poolItem.purchase_date < ord.order_date || poolItem.purchase_date > maxDateStr) continue;
 
-      // JAN一致または正規化名称一致
+      const janMatch = ord.jan_code && poolItem.jan_code && ord.jan_code === poolItem.jan_code;
+      const nameMatch = ord.name_key && poolItem.name_key && ord.name_key === poolItem.name_key;
+      const supplierMatch = ord.supplier && poolItem.supplier && (
+        ord.supplier.includes(poolItem.supplier) || poolItem.supplier.includes(ord.supplier)
+      );
+
+      if ((janMatch || nameMatch) && supplierMatch) {
+        const take = Math.min(needed, poolItem.available_boxes);
+        allocatedBoxQty += take;
+        needed -= take;
+        poolItem.available_boxes -= take;
+
+        if (!firstDelivDate && take > 0) {
+          firstDelivDate = poolItem.purchase_date;
+        }
+      }
+    }
+
+    // 2nd Pass: 他店分譲受入・別卸納品などを含めた一般的な商品一致検索
+    for (const poolItem of purchasePool) {
+      if (needed <= 0) break;
+      if (poolItem.available_boxes <= 0) continue;
+      if (poolItem.purchase_date < ord.order_date || poolItem.purchase_date > maxDateStr) continue;
+
       const janMatch = ord.jan_code && poolItem.jan_code && ord.jan_code === poolItem.jan_code;
       const nameMatch = ord.name_key && poolItem.name_key && ord.name_key === poolItem.name_key;
 
