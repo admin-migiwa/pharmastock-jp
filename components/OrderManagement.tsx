@@ -45,6 +45,9 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
   const [marginDays, setMarginDays] = useState<number>(7);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'unfulfilled' | 'pending' | 'delayed' | 'partial' | 'fulfilled' | 'candidate' | 'cancelled'>('all');
+  const [dateRangeFilter, setDateRangeFilter] = useState<'all' | '7days' | '14days' | '30days' | '90days' | 'thisMonth' | 'lastMonth' | 'custom'>('all');
+  const [customStartDate, setCustomStartDate] = useState<string>('');
+  const [customEndDate, setCustomEndDate] = useState<string>('');
   const [adjustingFilter, setAdjustingFilter] = useState<boolean>(false);
   const [shipmentMap, setShipmentMap] = useState<Map<string, ShipmentLookup>>(new Map());
   const [currentPage, setCurrentPage] = useState(1);
@@ -742,6 +745,39 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
         if (!matchName && !matchJan && !matchMaker && !matchSupplier) return false;
       }
 
+      // 日付期間フィルタ
+      if (dateRangeFilter !== 'all') {
+        const ordDateStr = (ord.order_date || '').replace(/\//g, '-');
+        if (!ordDateStr) return false;
+
+        const now = new Date();
+        const todayStr = now.toISOString().slice(0, 10);
+
+        if (dateRangeFilter === '7days') {
+          const past = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          if (ordDateStr < past || ordDateStr > todayStr) return false;
+        } else if (dateRangeFilter === '14days') {
+          const past = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          if (ordDateStr < past || ordDateStr > todayStr) return false;
+        } else if (dateRangeFilter === '30days') {
+          const past = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          if (ordDateStr < past || ordDateStr > todayStr) return false;
+        } else if (dateRangeFilter === '90days') {
+          const past = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          if (ordDateStr < past || ordDateStr > todayStr) return false;
+        } else if (dateRangeFilter === 'thisMonth') {
+          const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+          if (ordDateStr < startOfMonth || ordDateStr > todayStr) return false;
+        } else if (dateRangeFilter === 'lastMonth') {
+          const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0, 10);
+          const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().slice(0, 10);
+          if (ordDateStr < startOfLastMonth || ordDateStr > endOfLastMonth) return false;
+        } else if (dateRangeFilter === 'custom') {
+          if (customStartDate && ordDateStr < customStartDate) return false;
+          if (customEndDate && ordDateStr > customEndDate) return false;
+        }
+      }
+
       // 除外候補フィルタ
       if (statusFilter === 'candidate') {
         const lk = shipmentMap.get(ord.id);
@@ -774,11 +810,46 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
       return true;
     });
-  }, [orders, searchQuery, statusFilter, adjustingFilter, shipmentMap, ignoredItems]);
+  }, [orders, searchQuery, statusFilter, dateRangeFilter, customStartDate, customEndDate, adjustingFilter, shipmentMap, ignoredItems]);
 
   // サマリー計算
   const stats = useMemo(() => {
-    const activeOrders = orders.filter(o => o.status !== 'cancelled');
+    const activeOrders = orders.filter(o => {
+      if (o.status === 'cancelled') return false;
+      if (dateRangeFilter !== 'all') {
+        const ordDateStr = (o.order_date || '').replace(/\//g, '-');
+        if (!ordDateStr) return false;
+
+        const now = new Date();
+        const todayStr = now.toISOString().slice(0, 10);
+
+        if (dateRangeFilter === '7days') {
+          const past = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          if (ordDateStr < past || ordDateStr > todayStr) return false;
+        } else if (dateRangeFilter === '14days') {
+          const past = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          if (ordDateStr < past || ordDateStr > todayStr) return false;
+        } else if (dateRangeFilter === '30days') {
+          const past = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          if (ordDateStr < past || ordDateStr > todayStr) return false;
+        } else if (dateRangeFilter === '90days') {
+          const past = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          if (ordDateStr < past || ordDateStr > todayStr) return false;
+        } else if (dateRangeFilter === 'thisMonth') {
+          const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+          if (ordDateStr < startOfMonth || ordDateStr > todayStr) return false;
+        } else if (dateRangeFilter === 'lastMonth') {
+          const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0, 10);
+          const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().slice(0, 10);
+          if (ordDateStr < startOfLastMonth || ordDateStr > endOfLastMonth) return false;
+        } else if (dateRangeFilter === 'custom') {
+          if (customStartDate && ordDateStr < customStartDate) return false;
+          if (customEndDate && ordDateStr > customEndDate) return false;
+        }
+      }
+      return true;
+    });
+
     const total = activeOrders.length;
     const pending = activeOrders.filter(o => o.status === 'pending').length;
     const delayed = activeOrders.filter(o => o.status === 'delayed').length;
@@ -799,7 +870,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     });
 
     return { total, unfulfilledCount, pending, delayed, partial, fulfilled, candidateCount, adjustingCount };
-  }, [orders, shipmentMap]);
+  }, [orders, shipmentMap, dateRangeFilter, customStartDate, customEndDate]);
 
   // モーダル用候補オーダー一覧
   const candidateOrders = useMemo(() => {
@@ -836,7 +907,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, statusFilter, adjustingFilter]);
+  }, [searchQuery, statusFilter, adjustingFilter, dateRangeFilter, customStartDate, customEndDate]);
 
   return (
     <div className="p-4 sm:p-6 space-y-6 max-w-[1600px] mx-auto">
@@ -987,6 +1058,45 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
           {/* フィルタボタン群 */}
           <div className="flex flex-wrap items-center gap-2">
+            {/* 表示期間選択 */}
+            <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1 rounded-xl border border-slate-700 text-xs font-bold">
+              <Calendar className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="text-slate-300">表示期間:</span>
+              <select
+                value={dateRangeFilter}
+                onChange={(e) => setDateRangeFilter(e.target.value as any)}
+                className="bg-slate-900 text-xs text-white px-2.5 py-1 rounded-lg border border-slate-700 font-bold focus:outline-none focus:border-emerald-500 cursor-pointer"
+              >
+                <option value="all">全期間 (すべて表示)</option>
+                <option value="7days">直近1週間 (過去7日間)</option>
+                <option value="14days">直近2週間 (過去14日間)</option>
+                <option value="30days">直近1ヶ月 (過去30日間)</option>
+                <option value="90days">直近3ヶ月 (過去90日間)</option>
+                <option value="thisMonth">今月 (当月発注分)</option>
+                <option value="lastMonth">先月 (前月発注分)</option>
+                <option value="custom">日付指定 (期間入力)</option>
+              </select>
+            </div>
+
+            {dateRangeFilter === 'custom' && (
+              <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1 rounded-xl border border-slate-700 text-xs font-bold">
+                <span className="text-slate-400">期間:</span>
+                <input
+                  type="date"
+                  value={customStartDate}
+                  onChange={(e) => setCustomStartDate(e.target.value)}
+                  className="bg-slate-900 text-xs text-white px-2 py-1 rounded-lg border border-slate-700 font-bold focus:outline-none focus:border-emerald-500"
+                />
+                <span className="text-slate-400">〜</span>
+                <input
+                  type="date"
+                  value={customEndDate}
+                  onChange={(e) => setCustomEndDate(e.target.value)}
+                  className="bg-slate-900 text-xs text-white px-2 py-1 rounded-lg border border-slate-700 font-bold focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+            )}
+
             <div className="flex bg-slate-800 p-1 rounded-xl border border-slate-700">
               <button
                 onClick={() => setStatusFilter('all')}
