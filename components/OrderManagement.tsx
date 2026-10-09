@@ -429,7 +429,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
           <td style="font-weight:bold;">${ord.name}<br/><span style="color:#64748b;font-size:10px;">${ord.spec || ''} ${ord.maker ? '(' + ord.maker + ')' : ''}</span></td>
           <td style="font-family:monospace;">${ord.jan_code}</td>
           <td>${ord.supplier || '-'}</td>
-          <td style="text-align:center;font-weight:bold;">${ord.delivered_qty} / ${ord.order_qty}</td>
+          <td style="text-align:center;font-weight:bold;">${ord.order_qty} / ${ord.delivered_qty}</td>
           <td>${alreadyIgnored ? '一般除外品' : statusText + ' (' + delayBadge.label + ')'}</td>
           <td>${shipmentBadge ? shipmentBadge.label : '通常出荷'}</td>
         </tr>
@@ -486,7 +486,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               <th style="width:30%;">薬品名 / 規格 / メーカー</th>
               <th style="width:13%;">JANコード</th>
               <th style="width:12%;">発注先卸</th>
-              <th style="width:10%;text-align:center;">納入/発注</th>
+              <th style="width:10%;text-align:center;">発注数 / 納品数</th>
               <th style="width:12%;">納品状態 / 遅延</th>
               <th style="width:10%;">出荷調整</th>
             </tr>
@@ -1187,7 +1187,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                     <th className="py-3 px-4">薬品名 / 規格 / メーカー</th>
                     <th className="py-3 px-4">JANコード</th>
                     <th className="py-3 px-4">発注先卸</th>
-                    <th className="py-3 px-4 text-center">発注 / 納入</th>
+                    <th className="py-3 px-4 text-center">発注数 / 納品数</th>
                     <th className="py-3 px-4">納品状態 & 遅延ラグ</th>
                     <th className="py-3 px-4">厚労省 出荷調整状況</th>
                     <th className="py-3 px-4 text-center">除外設定 & 操作</th>
@@ -1259,7 +1259,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                         {/* 数量 */}
                         <td className="py-3.5 px-4 text-center whitespace-nowrap">
                           <div className="font-black text-sm text-white">
-                            {ord.delivered_qty} / {ord.order_qty}
+                            {ord.order_qty} / {ord.delivered_qty}
                           </div>
                           <div className="text-[10px] text-slate-400">
                             {ord.delivered_qty >= ord.order_qty ? '全量着荷' : ord.delivered_qty > 0 ? '一部着荷' : '未着荷'}
@@ -1633,7 +1633,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               <div>
                 <span className="text-slate-400">発注数量 / 納品数量:</span>
                 <div className="font-bold text-emerald-400 text-sm">
-                  {selectedOrderForDetail.order.delivered_qty} / {selectedOrderForDetail.order.order_qty}
+                  {selectedOrderForDetail.order.order_qty} / {selectedOrderForDetail.order.delivered_qty}
                 </div>
               </div>
               <div>
