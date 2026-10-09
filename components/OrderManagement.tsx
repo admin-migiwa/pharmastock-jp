@@ -109,11 +109,20 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     fetchOrders();
   }, [currentStoreId]);
 
-  // 除外候補判定ヘルパー
+  // 除外候補判定ヘルパー（OTC医薬品・検査薬・自費品・一般品）
   const isExclusionCandidate = (ord: Order, lookup?: ShipmentLookup): boolean => {
-    const candidateRegex = /ノルレボ|チェックワン|妊娠|排卵|自費|OTC|一般用|テストキット|検査薬/;
+    // 1. OTC医薬品・検査薬・自費品・一般用医薬品の包括的キーワード
+    const candidateRegex = /ノルレボ|エラワン|チェックワン|ドゥーテスト|ハイテスター|妊娠|排卵|自費|OTC|一般用|テストキット|検査薬|第[1１2２3３]類|類医薬品|指定第|外用薬|消毒液|マスク|サプリ|栄養|食品|化粧|資生堂|カネボウ|コーセー|ロート|アラクス|パブロン|新ルル|ルル|ガスター10|ガスター１０|ロキソニンS|ロキソニンＳ|アレグラFX|アレグラＦＸ|リアップ|チョコラ|アリナミン|ビオフェルミン|太田胃散|キャベジン/i;
+
     if (candidateRegex.test(ord.name)) return true;
-    if (lookup && lookup.kind === 'none' && (!ord.jan_code || !ord.jan_code.startsWith('4987'))) return true;
+
+    // 2. 厚労省の医療用医薬品マスタ（shipment_status）に一切ヒットしない商品 (kind === 'none')
+    // （OTC医薬品や検査薬・雑貨等は医療用医薬品マスタに存在しないため kind === 'none'）
+    if (lookup && lookup.kind === 'none') {
+      const isValidYj = /^[0-9A-Za-z]{12}$/.test((ord.yakka_code || ord.jan_code || '').trim());
+      if (!isValidYj) return true;
+    }
+
     return false;
   };
 
@@ -123,6 +132,46 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       (ig.jan_code && ig.jan_code === ord.jan_code) ||
       (ig.name_key && ord.name_key && ig.name_key === ord.name_key)
     );
+  };
+
+  // 表示中の除外候補を一括登録
+  const handleBulkAddToIgnored = async () => {
+    const candidateOrders = orders.filter(o => 
+      o.status !== 'cancelled' && 
+      !isAlreadyIgnored(o) && 
+      isExclusionCandidate(o, shipmentMap.get(o.id))
+    );
+
+    if (candidateOrders.length === 0) {
+      alert('一括除外する候補がありません');
+      return;
+    }
+
+    if (!window.confirm(`表示中の除外候補 ${candidateOrders.length} 件をすべて今後自動除外するマスタに登録しますか？`)) {
+      return;
+    }
+
+    try {
+      const newItems = candidateOrders.map(o => ({
+        store_id: currentStoreId,
+        jan_code: o.jan_code || null,
+        name: o.name,
+        name_key: o.name_key || normalizeName(o.name),
+        reason: '一般品・OTC・検査薬（一括除外）',
+        created_at: new Date().toISOString()
+      }));
+
+      const { error } = await supabase.from('ignored_order_items').insert(newItems);
+      if (error) throw error;
+
+      const ids = candidateOrders.map(o => o.id);
+      await supabase.from('orders').update({ status: 'cancelled' }).in('id', ids);
+
+      setUploadMessage({ type: 'success', text: `${candidateOrders.length} 件の一般品・OTC品を除外マスタに一括登録しました` });
+      await fetchOrders();
+    } catch (err: any) {
+      alert(`一括登録失敗: ${err.message}`);
+    }
   };
 
   // 除外マスタへ追加
@@ -655,6 +704,16 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               <AlertCircle className="w-3.5 h-3.5 text-purple-400" />
               <span>出荷調整中のみ ({stats.adjustingCount})</span>
             </button>
+
+            {statusFilter === 'candidate' && stats.candidateCount > 0 && (
+              <button
+                onClick={handleBulkAddToIgnored}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl bg-amber-600 hover:bg-amber-500 text-white shadow transition-all"
+              >
+                <ShieldAlert className="w-4 h-4" />
+                <span>候補 {stats.candidateCount} 件をすべて除外マスタに一括登録</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
