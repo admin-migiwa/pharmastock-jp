@@ -119,14 +119,19 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
         if (parsedRows.length === 0) continue;
 
-        const dbRows = parsedRows.map(r => {
+        const updates: Partial<Order>[] = [];
+        const inserts: Omit<Order, 'id'>[] = [];
+
+        parsedRows.forEach(r => {
           const key = `${currentStoreId}_${r.order_date}_${r.jan_code}_${r.order_qty}`;
           const existing = existingMap.get(key);
 
-          // すでに完了・部分着荷済みのデータはステータスや実績日を維持
-          if (existing && (existing.status === 'fulfilled' || existing.status === 'partial')) {
-            skippedCount++;
-            return {
+          if (existing) {
+            // 既存データがある場合はIDを指定して更新（完了状態などは維持）
+            if (existing.status === 'fulfilled' || existing.status === 'partial') {
+              skippedCount++;
+            }
+            updates.push({
               id: existing.id,
               store_id: currentStoreId,
               order_date: r.order_date,
@@ -145,46 +150,54 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               status: existing.status,
               source_file: file.name,
               updated_at: new Date().toISOString()
-            };
+            });
+          } else {
+            // 新規データは id プロパティを含めずに insert 用配列へ追加 (Supabase側でgen_random_uuid生成)
+            inserts.push({
+              store_id: currentStoreId,
+              order_date: r.order_date,
+              order_time: r.order_time,
+              delivery_date: r.delivery_date,
+              jan_code: r.jan_code,
+              name: r.name,
+              name_key: r.name_key,
+              spec: r.spec,
+              maker: r.maker,
+              supplier: r.supplier,
+              order_qty: r.order_qty,
+              delivered_qty: 0,
+              status: 'pending' as OrderStatus,
+              source_file: file.name,
+              updated_at: new Date().toISOString()
+            });
           }
-
-          return {
-            id: existing?.id, // IDがあれば上書き
-            store_id: currentStoreId,
-            order_date: r.order_date,
-            order_time: r.order_time,
-            delivery_date: r.delivery_date,
-            jan_code: r.jan_code,
-            name: r.name,
-            name_key: r.name_key,
-            spec: r.spec,
-            maker: r.maker,
-            supplier: r.supplier,
-            order_qty: r.order_qty,
-            delivered_qty: 0,
-            status: 'pending' as OrderStatus,
-            source_file: file.name,
-            updated_at: new Date().toISOString()
-          };
         });
 
-        const { error } = await supabase.from('orders').upsert(dbRows, {
-          onConflict: 'store_id,order_date,jan_code,order_qty'
-        });
+        // 既存データの更新実行
+        if (updates.length > 0) {
+          const { error: updateErr } = await supabase.from('orders').upsert(updates);
+          if (updateErr) {
+            console.error('Error updating existing orders:', updateErr);
+            throw new Error(`既存データの更新失敗: ${updateErr.message}`);
+          }
+        }
 
-        if (error) {
-          // フォールバック: insert
-          const newRowsOnly = dbRows.filter(r => !r.id);
-          if (newRowsOnly.length > 0) {
-            const { error: insertErr } = await supabase.from('orders').insert(newRowsOnly);
-            if (insertErr) console.warn('Fallback insert warning:', insertErr);
+        // 新規データの挿入実行
+        if (inserts.length > 0) {
+          const { error: insertErr } = await supabase.from('orders').insert(inserts);
+          if (insertErr) {
+            console.error('Error inserting new orders:', insertErr);
+            throw new Error(`新規データの登録失敗: ${insertErr.message}`);
           }
         }
 
         totalImported += parsedRows.length;
       } catch (err: any) {
-        console.error(`Error parsing file ${file.name}:`, err);
-        setUploadMessage({ type: 'error', text: `${file.name} の読み込みに失敗しました: ${err.message}` });
+        console.error(`Error processing file ${file.name}:`, err);
+        setUploadMessage({ type: 'error', text: `${file.name} の保存に失敗しました: ${err.message}` });
+        setLoading(false);
+        event.target.value = '';
+        return;
       }
     }
 
