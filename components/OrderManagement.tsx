@@ -32,6 +32,15 @@ import { supabase } from '../supabase';
 import { parseOrderCsv, reconcileOrders, getDelayBadge, DelayBadgeInfo } from '../orderMatch';
 import { lookupShipment, getShipmentBadge, normalizeName } from '../shipmentMatch';
 
+const normalizeForSearch = (str: string): string => {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .replace(/[Ａ-Ｚａ-ｚ０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+    .replace(/[\u30a1-\u30f6]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0x60))
+    .replace(/[\s\-_・]/g, '');
+};
+
 interface OrderManagementProps {
   stores: Store[];
   currentStoreId: string;
@@ -735,14 +744,15 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
   // フィルタリング処理
   const filteredOrders = useMemo(() => {
     return orders.filter(ord => {
-      // 検索ワード
+      // 検索ワード（全角半角・ひらがなカタカナ・メーカー・卸名を柔軟に照合）
       if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matchName = ord.name.toLowerCase().includes(q);
-        const matchJan = ord.jan_code.includes(q);
-        const matchMaker = (ord.maker || '').toLowerCase().includes(q);
-        const matchSupplier = (ord.supplier || '').toLowerCase().includes(q);
-        if (!matchName && !matchJan && !matchMaker && !matchSupplier) return false;
+        const q = normalizeForSearch(searchQuery);
+        const matchName = normalizeForSearch(ord.name).includes(q);
+        const matchNameKey = normalizeForSearch(ord.name_key || '').includes(q);
+        const matchJan = (ord.jan_code || '').includes(searchQuery.trim());
+        const matchMaker = normalizeForSearch(ord.maker || '').includes(q);
+        const matchSupplier = normalizeForSearch(ord.supplier || '').includes(q);
+        if (!matchName && !matchNameKey && !matchJan && !matchMaker && !matchSupplier) return false;
       }
 
       // 日付期間フィルタ
@@ -1049,11 +1059,25 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
-              placeholder="品名・JANコード・メーカー・発注先卸名で検索..."
+              placeholder="薬品名・規格・JANコード・メーカー・卸名で検索..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 text-white placeholder-slate-400 pl-9 pr-4 py-2 rounded-xl text-sm focus:outline-none focus:border-emerald-500 font-medium"
+              className="w-full bg-slate-800 border border-slate-700 text-white placeholder-slate-400 pl-9 pr-20 py-2 rounded-xl text-sm focus:outline-none focus:border-emerald-500 font-medium shadow-inner"
             />
+            {searchQuery && (
+              <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
+                <span className="text-[10px] text-emerald-400 font-bold bg-emerald-950/80 border border-emerald-800/60 px-2 py-0.5 rounded-full">
+                  {filteredOrders.length}件
+                </span>
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="text-slate-400 hover:text-white hover:bg-slate-700 p-0.5 rounded-full transition-all"
+                  title="検索をクリア"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
           </div>
 
           {/* フィルタボタン群 */}

@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   FileSpreadsheet, Upload, CheckCircle, AlertCircle, Info, Building2,
   FileWarning, RefreshCw, BarChart3, AlertTriangle, Truck, ChevronLeft, ChevronRight,
-  ChevronDown, ChevronUp, Package
+  ChevronDown, ChevronUp, Package, Search
 } from 'lucide-react';
 import readXlsxFile from 'read-excel-file/browser';
 import { supabase } from '../supabase';
@@ -171,13 +171,35 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
 
   // 自店の出荷調整対象医薬品一覧用
   const [adjustingItems, setAdjustingItems] = useState<{ stock: RealtimeStock; shipment: ShipmentLookup }[]>([]);
+  const [adjustingSearch, setAdjustingSearch] = useState<string>('');
   const [isAdjustingLoading, setIsAdjustingLoading] = useState<boolean>(false);
   const [adjustingPage, setAdjustingPage] = useState<number>(1);
   const [adjustingPageInput, setAdjustingPageInput] = useState<string>('1');
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
   const ITEMS_PER_PAGE = 20;
 
-  const totalAdjustingPages = Math.ceil(adjustingItems.length / ITEMS_PER_PAGE) || 1;
+  const normalizeForSearch = (str: string): string => {
+    if (!str) return '';
+    return str
+      .toLowerCase()
+      .replace(/[Ａ-Ｚａ-ｚ０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+      .replace(/[\u30a1-\u30f6]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0x60))
+      .replace(/[\s\-_・]/g, '');
+  };
+
+  const filteredAdjustingItems = React.useMemo(() => {
+    if (!adjustingSearch.trim()) return adjustingItems;
+    const q = normalizeForSearch(adjustingSearch);
+    return adjustingItems.filter(item => {
+      const matchName = normalizeForSearch(item.stock.name).includes(q);
+      const matchSpec = normalizeForSearch(item.stock.spec || '').includes(q);
+      const matchYj = (item.stock.yakka_code || '').includes(adjustingSearch.trim());
+      const matchShipment = item.shipment?.rows.some(r => normalizeForSearch(r.name).includes(q) || normalizeForSearch(r.status || '').includes(q));
+      return matchName || matchSpec || matchYj || matchShipment;
+    });
+  }, [adjustingItems, adjustingSearch]);
+
+  const totalAdjustingPages = Math.ceil(filteredAdjustingItems.length / ITEMS_PER_PAGE) || 1;
 
   useEffect(() => {
     setAdjustingPageInput(String(adjustingPage));
@@ -550,7 +572,7 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs font-black bg-amber-50 text-amber-700 px-3 py-1.5 rounded-xl border border-amber-200">
-              {adjustingItems.length.toLocaleString()} 品目
+              {filteredAdjustingItems.length.toLocaleString()} / {adjustingItems.length.toLocaleString()} 品目
             </span>
             <button
               onClick={() => loadAdjustingStocks()}
@@ -563,11 +585,40 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
           </div>
         </div>
 
+        {/* 検索バー */}
+        {adjustingItems.length > 0 && (
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="薬品名・規格・YJコードで検索..."
+              value={adjustingSearch}
+              onChange={(e) => {
+                setAdjustingSearch(e.target.value);
+                setAdjustingPage(1);
+              }}
+              className="w-full bg-slate-50 border border-slate-200 text-slate-900 placeholder-slate-400 pl-9 pr-8 py-2 rounded-xl text-xs font-bold focus:outline-none focus:border-blue-500"
+            />
+            {adjustingSearch && (
+              <button
+                onClick={() => {
+                  setAdjustingSearch('');
+                  setAdjustingPage(1);
+                }}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 text-xs font-bold"
+                title="クリア"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        )}
+
         {isAdjustingLoading ? (
           <div className="text-center py-12 text-slate-400 font-bold text-xs flex items-center justify-center gap-2">
             <RefreshCw size={16} className="animate-spin text-blue-600" /> 在庫データと照合中...
           </div>
-        ) : adjustingItems.length > 0 ? (
+        ) : filteredAdjustingItems.length > 0 ? (
           <div className="space-y-4">
             <div className="overflow-x-auto">
               <table className="w-full text-xs font-bold text-slate-700">
@@ -581,7 +632,7 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {adjustingItems
+                  {filteredAdjustingItems
                     .slice((adjustingPage - 1) * ITEMS_PER_PAGE, adjustingPage * ITEMS_PER_PAGE)
                     .map(({ stock, shipment }) => {
                       const isExpanded = expandedItemId === stock.id;
@@ -644,10 +695,10 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
             </div>
 
             {/* ページネーション */}
-            {adjustingItems.length > ITEMS_PER_PAGE && (
+            {filteredAdjustingItems.length > ITEMS_PER_PAGE && (
               <div className="flex items-center justify-between pt-2 border-t border-slate-100 flex-wrap gap-2">
                 <div className="text-xs font-bold text-slate-500">
-                  {(adjustingPage - 1) * ITEMS_PER_PAGE + 1} 〜 {Math.min(adjustingPage * ITEMS_PER_PAGE, adjustingItems.length)} 件表示 / 全 {adjustingItems.length.toLocaleString()} 件
+                  {(adjustingPage - 1) * ITEMS_PER_PAGE + 1} 〜 {Math.min(adjustingPage * ITEMS_PER_PAGE, filteredAdjustingItems.length)} 件表示 / 全 {filteredAdjustingItems.length.toLocaleString()} 件
                 </div>
                 <div className="flex items-center gap-2">
                   <button
