@@ -96,7 +96,20 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     setLoading(true);
     setUploadMessage(null);
 
+    // 既存の発注データを取得して重複・消し込み済みステータスを退避
+    const { data: existingDbOrders } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('store_id', currentStoreId);
+
+    const existingMap = new Map<string, Order>();
+    (existingDbOrders as Order[] || []).forEach(o => {
+      const key = `${o.store_id}_${o.order_date}_${o.jan_code}_${o.order_qty}`;
+      existingMap.set(key, o);
+    });
+
     let totalImported = 0;
+    let skippedCount = 0;
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -106,23 +119,54 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
         if (parsedRows.length === 0) continue;
 
-        const dbRows = parsedRows.map(r => ({
-          store_id: currentStoreId,
-          order_date: r.order_date,
-          order_time: r.order_time,
-          delivery_date: r.delivery_date,
-          jan_code: r.jan_code,
-          name: r.name,
-          name_key: r.name_key,
-          spec: r.spec,
-          maker: r.maker,
-          supplier: r.supplier,
-          order_qty: r.order_qty,
-          delivered_qty: 0,
-          status: 'pending' as OrderStatus,
-          source_file: file.name,
-          updated_at: new Date().toISOString()
-        }));
+        const dbRows = parsedRows.map(r => {
+          const key = `${currentStoreId}_${r.order_date}_${r.jan_code}_${r.order_qty}`;
+          const existing = existingMap.get(key);
+
+          // すでに完了・部分着荷済みのデータはステータスや実績日を維持
+          if (existing && (existing.status === 'fulfilled' || existing.status === 'partial')) {
+            skippedCount++;
+            return {
+              id: existing.id,
+              store_id: currentStoreId,
+              order_date: r.order_date,
+              order_time: r.order_time || existing.order_time,
+              delivery_date: r.delivery_date,
+              actual_delivery_date: existing.actual_delivery_date,
+              delay_days: existing.delay_days,
+              jan_code: r.jan_code,
+              name: r.name,
+              name_key: r.name_key,
+              spec: r.spec || existing.spec,
+              maker: r.maker || existing.maker,
+              supplier: r.supplier || existing.supplier,
+              order_qty: r.order_qty,
+              delivered_qty: existing.delivered_qty,
+              status: existing.status,
+              source_file: file.name,
+              updated_at: new Date().toISOString()
+            };
+          }
+
+          return {
+            id: existing?.id, // IDがあれば上書き
+            store_id: currentStoreId,
+            order_date: r.order_date,
+            order_time: r.order_time,
+            delivery_date: r.delivery_date,
+            jan_code: r.jan_code,
+            name: r.name,
+            name_key: r.name_key,
+            spec: r.spec,
+            maker: r.maker,
+            supplier: r.supplier,
+            order_qty: r.order_qty,
+            delivered_qty: 0,
+            status: 'pending' as OrderStatus,
+            source_file: file.name,
+            updated_at: new Date().toISOString()
+          };
+        });
 
         const { error } = await supabase.from('orders').upsert(dbRows, {
           onConflict: 'store_id,order_date,jan_code,order_qty'
@@ -130,8 +174,11 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
         if (error) {
           // フォールバック: insert
-          const { error: insertErr } = await supabase.from('orders').insert(dbRows);
-          if (insertErr) throw insertErr;
+          const newRowsOnly = dbRows.filter(r => !r.id);
+          if (newRowsOnly.length > 0) {
+            const { error: insertErr } = await supabase.from('orders').insert(newRowsOnly);
+            if (insertErr) console.warn('Fallback insert warning:', insertErr);
+          }
         }
 
         totalImported += parsedRows.length;

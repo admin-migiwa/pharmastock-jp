@@ -28,6 +28,7 @@ create index if not exists orders_store_id_idx on public.orders (store_id);
 create index if not exists orders_order_date_idx on public.orders (order_date);
 create index if not exists orders_jan_code_idx on public.orders (jan_code);
 create index if not exists orders_status_idx on public.orders (status);
+create unique index if not exists orders_unique_key_idx on public.orders (store_id, order_date, jan_code, order_qty);
 
 alter table public.orders enable row level security;
 
