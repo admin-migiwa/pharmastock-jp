@@ -149,8 +149,18 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       isExclusionCandidate(o, shipmentMap.get(o.id))
     );
 
-    const initialSet = new Set(candidateOrders.map(o => o.id));
-    setSelectedCandidateIds(initialSet);
+    // OTC・検査薬・一般用品キーワードに合致するもののみ初期チェックON
+    // 薬価削除品（EPLカプセル、キンダベート軟膏等）は誤チェック防止のため初期状態ではチェックOFF
+    const initialCheckedIds = new Set<string>();
+    const otcRegex = /ノルレボ|エラワン|チェックワン|ドゥーテスト|ハイテスター|妊娠|排卵|自費|OTC|一般用|テストキット|検査薬|第[1１2２3３]類|類医薬品|指定第|外用薬|消毒液|マスク|サプリ|栄養|食品|化粧|資生堂|カネボウ|コーセー|ロート|アラクス|パブロン|新ルル|ルル|ガスター|ロキソニンS|ロキソニンＳ|アレグラFX|アレグラＦＸ|リアップ|チョコラ|アリナミン|ビオフェルミン|太田胃散|キャベジン/i;
+
+    candidateOrders.forEach(o => {
+      if (otcRegex.test(o.name)) {
+        initialCheckedIds.add(o.id);
+      }
+    });
+
+    setSelectedCandidateIds(initialCheckedIds);
     setShowCandidateModal(true);
   };
 
@@ -228,15 +238,83 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
   };
 
   // 除外マスタから削除 (復元)
-  const handleRemoveFromIgnored = async (ignoredId: string) => {
+  const handleRemoveFromIgnored = async (item: IgnoredOrderItem) => {
     try {
-      const { error } = await supabase.from('ignored_order_items').delete().eq('id', ignoredId);
-      if (error) throw error;
+      // 1. 除外マスタから削除
+      const { error: delErr } = await supabase.from('ignored_order_items').delete().eq('id', item.id);
+      if (delErr) throw delErr;
 
-      setUploadMessage({ type: 'success', text: '除外マスタから削除（復元）しました' });
+      // 2. 該当品目のキャンセル済み発注レコードを pending に復元
+      let orderQuery = supabase
+        .from('orders')
+        .update({ status: 'pending', updated_at: new Date().toISOString() })
+        .eq('store_id', currentStoreId)
+        .eq('status', 'cancelled');
+
+      if (item.jan_code) {
+        orderQuery = orderQuery.eq('jan_code', item.jan_code);
+      } else if (item.name_key) {
+        orderQuery = orderQuery.eq('name_key', item.name_key);
+      }
+
+      const { error: updateErr } = await orderQuery;
+      if (updateErr) console.warn('Order status restore warning:', updateErr);
+
+      setUploadMessage({ type: 'success', text: `「${item.name}」を除外マスタから削除し、発注一覧へ復元しました` });
+
+      // 3. 再照合を実行
+      try {
+        await reconcileOrders(currentStoreId, marginDays);
+      } catch (rErr) {
+        console.warn('Reconcile error after restore:', rErr);
+      }
+
       await fetchOrders();
     } catch (err: any) {
-      alert(`削除に失敗しました: ${err.message}`);
+      alert(`復元処理に失敗しました: ${err.message}`);
+    }
+  };
+
+  // 発注一覧上の個別の「除外設定済み」行からの復元処理
+  const handleRemoveFromIgnoredOrder = async (order: Order) => {
+    try {
+      // 1. 除外マスタから該当するJANコードまたは name_key の品目を削除
+      if (order.jan_code) {
+        await supabase
+          .from('ignored_order_items')
+          .delete()
+          .eq('store_id', currentStoreId)
+          .eq('jan_code', order.jan_code);
+      }
+      const nameKey = order.name_key || normalizeName(order.name);
+      if (nameKey) {
+        await supabase
+          .from('ignored_order_items')
+          .delete()
+          .eq('store_id', currentStoreId)
+          .eq('name_key', nameKey);
+      }
+
+      // 2. 発注レコードのステータスを pending に復元
+      const { error: updateErr } = await supabase
+        .from('orders')
+        .update({ status: 'pending', updated_at: new Date().toISOString() })
+        .eq('id', order.id);
+
+      if (updateErr) throw updateErr;
+
+      setUploadMessage({ type: 'success', text: `「${order.name}」を除外解除し、管理対象に復元しました` });
+
+      // 3. 再照合を実行
+      try {
+        await reconcileOrders(currentStoreId, marginDays);
+      } catch (rErr) {
+        console.warn('Reconcile error after order restore:', rErr);
+      }
+
+      await fetchOrders();
+    } catch (err: any) {
+      alert(`除外解除に失敗しました: ${err.message}`);
     }
   };
 
@@ -910,7 +988,14 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                                 <span>除外設定</span>
                               </button>
                             ) : (
-                              <span className="text-slate-500 text-[11px]">除外中</span>
+                              <button
+                                onClick={() => handleRemoveFromIgnoredOrder(ord)}
+                                title="除外設定を解除して管理対象に復元"
+                                className="flex items-center gap-1 px-2 py-1 bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 rounded-lg text-[11px] font-bold border border-emerald-700/60 transition-colors"
+                              >
+                                <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                                <span>除外解除（復元）</span>
+                              </button>
                             )}
 
                             {ord.status !== 'fulfilled' && !alreadyIgnored && (
@@ -1139,7 +1224,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                     </div>
 
                     <button
-                      onClick={() => handleRemoveFromIgnored(item.id)}
+                      onClick={() => handleRemoveFromIgnored(item)}
                       className="px-3 py-1 bg-rose-950/70 hover:bg-rose-900 text-rose-300 text-xs font-bold rounded-lg border border-rose-800/60 transition-colors"
                     >
                       解除（復元）
