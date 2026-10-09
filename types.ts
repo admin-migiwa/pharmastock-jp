@@ -159,5 +159,15 @@ export interface Order {
   updated_at?: string;
 }
 
+export interface IgnoredOrderItem {
+  id: string;
+  store_id: string;
+  jan_code?: string | null;
+  name: string;
+  name_key: string;
+  reason?: string | null;
+  created_at?: string;
+}
+
 export type ViewType = 'dashboard' | 'realtime_search' | 'inventory' | 'adoption' | 'realtime_import' | 'expiry_import' | 'shipment_import' | 'order_management' | 'import' | 'stores' | 'manual' | 'unstocked_compare';
 

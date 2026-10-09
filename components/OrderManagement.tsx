@@ -16,13 +16,17 @@ import {
   Calendar,
   Building2,
   PackageCheck,
-  Check
+  Check,
+  ShieldAlert,
+  EyeOff,
+  PlusCircle,
+  ShieldCheck,
+  ListFilter
 } from 'lucide-react';
-import { Store, Order, OrderStatus } from '../types';
+import { Store, Order, OrderStatus, IgnoredOrderItem, ShipmentLookup } from '../types';
 import { supabase } from '../supabase';
 import { parseOrderCsv, reconcileOrders, getDelayBadge, DelayBadgeInfo } from '../orderMatch';
-import { lookupShipment, getShipmentBadge } from '../shipmentMatch';
-import { ShipmentLookup } from '../types';
+import { lookupShipment, getShipmentBadge, normalizeName } from '../shipmentMatch';
 
 interface OrderManagementProps {
   stores: Store[];
@@ -31,25 +35,46 @@ interface OrderManagementProps {
 
 export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, currentStoreId }) => {
   const [orders, setOrders] = useState<Order[]>([]);
+  const [ignoredItems, setIgnoredItems] = useState<IgnoredOrderItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [reconciling, setReconciling] = useState(false);
   const [marginDays, setMarginDays] = useState<number>(7);
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'unfulfilled' | 'pending' | 'delayed' | 'partial' | 'fulfilled'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'unfulfilled' | 'pending' | 'delayed' | 'partial' | 'fulfilled' | 'candidate' | 'cancelled'>('all');
   const [adjustingFilter, setAdjustingFilter] = useState<boolean>(false);
   const [shipmentMap, setShipmentMap] = useState<Map<string, ShipmentLookup>>(new Map());
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 20;
   const [uploadMessage, setUploadMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [selectedOrderForDetail, setSelectedOrderForDetail] = useState<{ order: Order; shipment?: ShipmentLookup } | null>(null);
+  const [showIgnoredMasterModal, setShowIgnoredMasterModal] = useState<boolean>(false);
 
   const currentStore = stores.find(s => s.id === currentStoreId);
+
+  // 除外対象マスタの取得
+  const fetchIgnoredItems = async () => {
+    if (!currentStoreId) return;
+    try {
+      const { data, error } = await supabase
+        .from('ignored_order_items')
+        .select('*')
+        .eq('store_id', currentStoreId);
+
+      if (!error && data) {
+        setIgnoredItems(data as IgnoredOrderItem[]);
+      }
+    } catch (e) {
+      console.warn('fetchIgnoredItems warning:', e);
+    }
+  };
 
   // データ取得
   const fetchOrders = async () => {
     if (!currentStoreId) return;
     setLoading(true);
     try {
+      await fetchIgnoredItems();
+
       const { data, error } = await supabase
         .from('orders')
         .select('*')
@@ -84,6 +109,62 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     fetchOrders();
   }, [currentStoreId]);
 
+  // 除外候補判定ヘルパー
+  const isExclusionCandidate = (ord: Order, lookup?: ShipmentLookup): boolean => {
+    const candidateRegex = /ノルレボ|チェックワン|妊娠|排卵|自費|OTC|一般用|テストキット|検査薬/;
+    if (candidateRegex.test(ord.name)) return true;
+    if (lookup && lookup.kind === 'none' && (!ord.jan_code || !ord.jan_code.startsWith('4987'))) return true;
+    return false;
+  };
+
+  // マスタ設定済み除外品判定
+  const isAlreadyIgnored = (ord: Order): boolean => {
+    return ignoredItems.some(ig => 
+      (ig.jan_code && ig.jan_code === ord.jan_code) ||
+      (ig.name_key && ord.name_key && ig.name_key === ord.name_key)
+    );
+  };
+
+  // 除外マスタへ追加
+  const handleAddToIgnored = async (order: Order, reason = '一般品・自費品（管理対象外）') => {
+    if (!currentStoreId) return;
+    try {
+      const nameKey = order.name_key || normalizeName(order.name);
+      const newItem = {
+        store_id: currentStoreId,
+        jan_code: order.jan_code || null,
+        name: order.name,
+        name_key: nameKey,
+        reason,
+        created_at: new Date().toISOString()
+      };
+
+      const { error } = await supabase.from('ignored_order_items').insert([newItem]);
+      if (error) throw error;
+
+      // 該当発注レコードのステータスを cancelled (除外) に更新
+      await supabase.from('orders').update({ status: 'cancelled' }).eq('id', order.id);
+
+      setUploadMessage({ type: 'success', text: `「${order.name}」を今後自動除外するマスタに登録しました` });
+      await fetchOrders();
+    } catch (err: any) {
+      alert(`除外登録に失敗しました: ${err.message}`);
+    }
+  };
+
+  // 除外マスタから削除 (復元)
+  const handleRemoveFromIgnored = async (ignoredId: string) => {
+    try {
+      const { error } = await supabase.from('ignored_order_items').delete().eq('id', ignoredId);
+      if (error) throw error;
+
+      setUploadMessage({ type: 'success', text: '除外マスタから削除（復元）しました' });
+      await fetchOrders();
+    } catch (err: any) {
+      alert(`削除に失敗しました: ${err.message}`);
+    }
+  };
+
   // CSVインポート処理
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -96,7 +177,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     setLoading(true);
     setUploadMessage(null);
 
-    // 既存の発注データを取得して重複・消し込み済みステータスを退避
+    // 既存データ取得
     const { data: existingDbOrders } = await supabase
       .from('orders')
       .select('*')
@@ -104,8 +185,15 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
     const existingPool = [...((existingDbOrders as Order[]) || [])];
 
+    // 除外マスタ最新取得
+    const { data: latestIgnored } = await supabase
+      .from('ignored_order_items')
+      .select('*')
+      .eq('store_id', currentStoreId);
+    const ignoredList = (latestIgnored as IgnoredOrderItem[]) || [];
+
     let totalImported = 0;
-    let skippedCount = 0;
+    let autoIgnoredCount = 0;
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -119,7 +207,18 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
         const inserts: Omit<Order, 'id'>[] = [];
 
         parsedRows.forEach(r => {
-          // 既存DBの中から「店舗・発注日・JAN・発注数量」が一致する未使用レコードを探す
+          // 除外マスタに該当するか判定
+          const isIgnoredByMaster = ignoredList.some(ig => 
+            (ig.jan_code && ig.jan_code === r.jan_code) ||
+            (ig.name_key && ig.name_key === r.name_key)
+          );
+
+          if (isIgnoredByMaster) {
+            autoIgnoredCount++;
+          }
+
+          const initialStatus: OrderStatus = isIgnoredByMaster ? 'cancelled' : 'pending';
+
           const matchIdx = existingPool.findIndex(o => 
             o.store_id === currentStoreId &&
             o.order_date === r.order_date &&
@@ -129,11 +228,8 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
           if (matchIdx !== -1) {
             const existing = existingPool[matchIdx];
-            existingPool.splice(matchIdx, 1); // マッチしたものは1対1で消費
+            existingPool.splice(matchIdx, 1);
 
-            if (existing.status === 'fulfilled' || existing.status === 'partial') {
-              skippedCount++;
-            }
             updates.push({
               id: existing.id,
               store_id: currentStoreId,
@@ -150,7 +246,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               supplier: r.supplier || existing.supplier,
               order_qty: r.order_qty,
               delivered_qty: existing.delivered_qty,
-              status: existing.status,
+              status: existing.status === 'fulfilled' || existing.status === 'partial' ? existing.status : initialStatus,
               source_file: file.name,
               updated_at: new Date().toISOString()
             });
@@ -168,29 +264,21 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               supplier: r.supplier,
               order_qty: r.order_qty,
               delivered_qty: 0,
-              status: 'pending' as OrderStatus,
+              status: initialStatus,
               source_file: file.name,
               updated_at: new Date().toISOString()
             });
           }
         });
 
-        // 既存データの更新実行
         if (updates.length > 0) {
           const { error: updateErr } = await supabase.from('orders').upsert(updates);
-          if (updateErr) {
-            console.error('Error updating existing orders:', updateErr);
-            throw new Error(`既存データの更新失敗: ${updateErr.message}`);
-          }
+          if (updateErr) throw new Error(`更新失敗: ${updateErr.message}`);
         }
 
-        // 新規データの挿入実行
         if (inserts.length > 0) {
           const { error: insertErr } = await supabase.from('orders').insert(inserts);
-          if (insertErr) {
-            console.error('Error inserting new orders:', insertErr);
-            throw new Error(`新規データの登録失敗: ${insertErr.message}`);
-          }
+          if (insertErr) throw new Error(`新規登録失敗: ${insertErr.message}`);
         }
 
         totalImported += parsedRows.length;
@@ -204,11 +292,15 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     }
 
     if (totalImported > 0) {
-      setUploadMessage({ type: 'success', text: `${totalImported} 件の発注データをインポートしました。照合を実行中...` });
-      // 自動照合
+      let msg = `${totalImported} 件の発注データをインポートしました。`;
+      if (autoIgnoredCount > 0) {
+        msg += ` (${autoIgnoredCount} 件を除外マスタに基づき自動除外)`;
+      }
+      setUploadMessage({ type: 'success', text: `${msg} 照合を実行中...` });
+
       try {
         const result = await reconcileOrders(currentStoreId, marginDays);
-        setUploadMessage({ type: 'success', text: `${totalImported} 件をインポートし、${result.updatedCount} 件の消し込みを行いました。` });
+        setUploadMessage({ type: 'success', text: `${msg} 照合完了（${result.updatedCount} 件を更新）` });
       } catch (rErr) {
         console.error('Auto reconcile error:', rErr);
       }
@@ -218,23 +310,20 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     event.target.value = '';
   };
 
-  // 文字エンコーディング判定付きファイル読み込み
+  // エンコーディング解読付きファイル読み込み
   const readFileWithEncoding = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = (e) => {
         const buffer = e.target?.result as ArrayBuffer;
-        // Shift_JIS (CP932) でまずデコード
         const sjisDecoder = new TextDecoder('shift-jis');
         const sjisText = sjisDecoder.decode(buffer);
 
-        // ヘッダーや主要キーワード（発注、品名、商品コード、数量等）が解読できていれば Shift_JIS と判定
         if (/発注|品名|商品コード|発注数量|納品/.test(sjisText) && !sjisText.includes('\uFFFD')) {
           resolve(sjisText);
           return;
         }
 
-        // そうでなければ UTF-8 で試行
         const utf8Decoder = new TextDecoder('utf-8');
         const utf8Text = utf8Decoder.decode(buffer);
         if (/発注|品名|商品コード|発注数量|納品/.test(utf8Text)) {
@@ -242,7 +331,6 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
           return;
         }
 
-        // キーワードが見つからない場合はデフォルトで Shift_JIS の解読結果を採用
         resolve(sjisText);
       };
       reader.onerror = (err) => reject(err);
@@ -266,7 +354,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     }
   };
 
-  // 個別ステータス更新
+  // 手動ステータス変更
   const handleStatusChange = async (orderId: string, newStatus: OrderStatus) => {
     try {
       const patch: Partial<Order> = {
@@ -313,6 +401,22 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
         if (!matchName && !matchJan && !matchMaker && !matchSupplier) return false;
       }
 
+      // 除外候補フィルタ
+      if (statusFilter === 'candidate') {
+        const lk = shipmentMap.get(ord.id);
+        if (!isExclusionCandidate(ord, lk) || ord.status === 'cancelled') return false;
+        return true;
+      }
+
+      // 除外済みフィルタ
+      if (statusFilter === 'cancelled') {
+        if (ord.status !== 'cancelled' && !isAlreadyIgnored(ord)) return false;
+        return true;
+      }
+
+      // 通常時はキャンセル（除外済み）は非表示
+      if (ord.status === 'cancelled' && statusFilter !== 'cancelled') return false;
+
       // ステータスフィルタ
       if (statusFilter === 'unfulfilled') {
         if (ord.status === 'fulfilled' || ord.status === 'cancelled') return false;
@@ -329,24 +433,31 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
       return true;
     });
-  }, [orders, searchQuery, statusFilter, adjustingFilter, shipmentMap]);
+  }, [orders, searchQuery, statusFilter, adjustingFilter, shipmentMap, ignoredItems]);
 
   // サマリー計算
   const stats = useMemo(() => {
-    const total = orders.length;
-    const pending = orders.filter(o => o.status === 'pending').length;
-    const delayed = orders.filter(o => o.status === 'delayed').length;
-    const partial = orders.filter(o => o.status === 'partial').length;
-    const fulfilled = orders.filter(o => o.status === 'fulfilled').length;
+    const activeOrders = orders.filter(o => o.status !== 'cancelled');
+    const total = activeOrders.length;
+    const pending = activeOrders.filter(o => o.status === 'pending').length;
+    const delayed = activeOrders.filter(o => o.status === 'delayed').length;
+    const partial = activeOrders.filter(o => o.status === 'partial').length;
+    const fulfilled = activeOrders.filter(o => o.status === 'fulfilled').length;
     const unfulfilledCount = pending + delayed + partial;
 
+    let candidateCount = 0;
+    activeOrders.forEach(o => {
+      const lk = shipmentMap.get(o.id);
+      if (isExclusionCandidate(o, lk)) candidateCount++;
+    });
+
     let adjustingCount = 0;
-    orders.forEach(o => {
+    activeOrders.forEach(o => {
       const lk = shipmentMap.get(o.id);
       if (lk && getShipmentBadge(lk.rows)) adjustingCount++;
     });
 
-    return { total, unfulfilledCount, pending, delayed, partial, fulfilled, adjustingCount };
+    return { total, unfulfilledCount, pending, delayed, partial, fulfilled, candidateCount, adjustingCount };
   }, [orders, shipmentMap]);
 
   // ページネーション
@@ -370,12 +481,20 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
             <h1 className="text-2xl font-black tracking-wide">発注・未納品管理</h1>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            発注CSVデータを入庫履歴と照合し、未納品・納期ズレ・出荷調整品目を可視化します
+            発注CSVデータを入庫履歴と照合し、未納品・納期ズレ・出荷調整および一般除外品を管理します
           </p>
         </div>
 
-        {/* ファイルインポート & 照合実行ボタン */}
+        {/* ボタン群 */}
         <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={() => setShowIgnoredMasterModal(true)}
+            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 text-xs font-bold px-3.5 py-2.5 rounded-xl shadow transition-all"
+          >
+            <ShieldAlert className="w-4 h-4 text-amber-400" />
+            <span>除外マスタ設定 ({ignoredItems.length}件)</span>
+          </button>
+
           <label className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-4 py-2.5 rounded-xl cursor-pointer shadow-lg transition-all transform hover:-translate-y-0.5 text-sm">
             <Upload className="w-4 h-4" />
             <span>発注CSVインポート</span>
@@ -397,7 +516,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               className="bg-slate-900 text-xs text-white px-2 py-1.5 rounded-lg border border-slate-700 font-bold focus:outline-none focus:border-emerald-500"
             >
               <option value={3}>指定日+3日</option>
-              <option value={7}>指定日+7日 (推移可視化)</option>
+              <option value={7}>指定日+7日 (標準)</option>
               <option value={14}>指定日+14日</option>
               <option value={30}>指定日+30日</option>
               <option value={999}>全期間</option>
@@ -430,7 +549,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       {/* サマリーカード */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-2xl shadow-lg">
-          <div className="text-xs font-bold text-slate-400">全発注件数</div>
+          <div className="text-xs font-bold text-slate-400">対象発注件数</div>
           <div className="text-2xl font-black text-white mt-1">{stats.total} <span className="text-xs font-normal text-slate-400">件</span></div>
         </div>
         <div className="bg-rose-950/40 border border-rose-800/50 p-4 rounded-2xl shadow-lg">
@@ -495,15 +614,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                   statusFilter === 'unfulfilled' ? 'bg-rose-600 text-white shadow' : 'text-slate-400 hover:text-white'
                 }`}
               >
-                未完納のみ ({stats.unfulfilledCount})
-              </button>
-              <button
-                onClick={() => setStatusFilter('partial')}
-                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
-                  statusFilter === 'partial' ? 'bg-amber-600 text-white shadow' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                分納
+                未完納 ({stats.unfulfilledCount})
               </button>
               <button
                 onClick={() => setStatusFilter('fulfilled')}
@@ -512,6 +623,24 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                 }`}
               >
                 完納
+              </button>
+              <button
+                onClick={() => setStatusFilter('candidate')}
+                className={`flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                  statusFilter === 'candidate' ? 'bg-amber-600 text-white shadow' : 'text-amber-400 hover:text-white'
+                }`}
+              >
+                <ShieldAlert className="w-3 h-3" />
+                <span>除外候補 ({stats.candidateCount})</span>
+              </button>
+              <button
+                onClick={() => setStatusFilter('cancelled')}
+                className={`flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                  statusFilter === 'cancelled' ? 'bg-slate-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <EyeOff className="w-3 h-3" />
+                <span>除外済み</span>
               </button>
             </div>
 
@@ -538,7 +667,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
           </div>
         ) : filteredOrders.length === 0 ? (
           <div className="p-12 text-center text-slate-400 font-medium">
-            該当する発注データが見つかりません。発注CSVファイルをインポートしてください。
+            該当する発注データが見つかりません。
           </div>
         ) : (
           <>
@@ -553,7 +682,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                     <th className="py-3 px-4 text-center">発注 / 納入</th>
                     <th className="py-3 px-4">納品状態 & 遅延ラグ</th>
                     <th className="py-3 px-4">厚労省 出荷調整状況</th>
-                    <th className="py-3 px-4 text-center">操作</th>
+                    <th className="py-3 px-4 text-center">除外設定 & 操作</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 font-medium">
@@ -561,11 +690,13 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                     const delayBadge = getDelayBadge(ord);
                     const shipmentLk = shipmentMap.get(ord.id);
                     const shipmentBadge = shipmentLk ? getShipmentBadge(shipmentLk.rows) : null;
+                    const candidate = isExclusionCandidate(ord, shipmentLk);
+                    const alreadyIgnored = isAlreadyIgnored(ord) || ord.status === 'cancelled';
 
                     return (
                       <tr 
                         key={ord.id}
-                        className="hover:bg-slate-800/40 transition-colors"
+                        className={`hover:bg-slate-800/40 transition-colors ${alreadyIgnored ? 'opacity-50 bg-slate-950/40' : ''}`}
                       >
                         {/* 日付 */}
                         <td className="py-3.5 px-4 whitespace-nowrap">
@@ -578,12 +709,29 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
                         {/* 薬品名 */}
                         <td className="py-3.5 px-4">
-                          <div 
-                            className="font-bold text-emerald-400 hover:underline cursor-pointer text-sm"
-                            onClick={() => setSelectedOrderForDetail({ order: ord, shipment: shipmentLk })}
-                          >
-                            {ord.name}
+                          <div className="flex items-center gap-2">
+                            <div 
+                              className="font-bold text-emerald-400 hover:underline cursor-pointer text-sm"
+                              onClick={() => setSelectedOrderForDetail({ order: ord, shipment: shipmentLk })}
+                            >
+                              {ord.name}
+                            </div>
+
+                            {candidate && !alreadyIgnored && (
+                              <span className="bg-amber-950 text-amber-300 border border-amber-700/60 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-0.5">
+                                <ShieldAlert className="w-3 h-3 text-amber-400" />
+                                <span>除外候補</span>
+                              </span>
+                            )}
+
+                            {alreadyIgnored && (
+                              <span className="bg-slate-800 text-slate-400 border border-slate-700 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-0.5">
+                                <EyeOff className="w-3 h-3" />
+                                <span>除外設定済み</span>
+                              </span>
+                            )}
                           </div>
+
                           <div className="text-[11px] text-slate-400 flex flex-wrap gap-2 mt-0.5">
                             {ord.spec && <span>規格: {ord.spec}</span>}
                             {ord.maker && <span>メーカー: {ord.maker}</span>}
@@ -612,25 +760,28 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
                         {/* 納品状態 & ラグ */}
                         <td className="py-3.5 px-4 whitespace-nowrap">
-                          <div className="flex flex-col gap-1 items-start">
-                            {/* ラグバッジ */}
-                            <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold shadow-sm ${
-                              delayBadge.level === 'on_time' ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700' :
-                              delayBadge.level === 'slight_delay' ? 'bg-amber-900/60 text-amber-300 border border-amber-700' :
-                              delayBadge.level === 'severe_delay' ? 'bg-rose-900/60 text-rose-300 border border-rose-700 animate-pulse' :
-                              delayBadge.level === 'pending_overdue' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
-                              delayBadge.level === 'early' ? 'bg-blue-900/60 text-blue-300 border border-blue-700' :
-                              'bg-slate-800 text-slate-300 border border-slate-700'
-                            }`}>
-                              <Clock className="w-3 h-3" />
-                              {delayBadge.label}
-                            </span>
-                            {ord.actual_delivery_date && (
-                              <span className="text-[10px] text-slate-400">
-                                入庫日: {ord.actual_delivery_date}
+                          {alreadyIgnored ? (
+                            <span className="text-slate-500 text-xs font-bold">一般除外品</span>
+                          ) : (
+                            <div className="flex flex-col gap-1 items-start">
+                              <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold shadow-sm ${
+                                delayBadge.level === 'on_time' ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700' :
+                                delayBadge.level === 'slight_delay' ? 'bg-amber-900/60 text-amber-300 border border-amber-700' :
+                                delayBadge.level === 'severe_delay' ? 'bg-rose-900/60 text-rose-300 border border-rose-700 animate-pulse' :
+                                delayBadge.level === 'pending_overdue' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
+                                delayBadge.level === 'early' ? 'bg-blue-900/60 text-blue-300 border border-blue-700' :
+                                'bg-slate-800 text-slate-300 border border-slate-700'
+                              }`}>
+                                <Clock className="w-3 h-3" />
+                                {delayBadge.label}
                               </span>
-                            )}
-                          </div>
+                              {ord.actual_delivery_date && (
+                                <span className="text-[10px] text-slate-400">
+                                  入庫日: {ord.actual_delivery_date}
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </td>
 
                         {/* 厚労省出荷調整バッジ */}
@@ -655,10 +806,23 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                           )}
                         </td>
 
-                        {/* 操作 */}
+                        {/* 操作・除外登録 */}
                         <td className="py-3.5 px-4 text-center whitespace-nowrap">
                           <div className="flex items-center justify-center gap-1.5">
-                            {ord.status !== 'fulfilled' && (
+                            {!alreadyIgnored ? (
+                              <button
+                                onClick={() => handleAddToIgnored(ord)}
+                                title="次回から自動で除外する対象マスタに登録"
+                                className="flex items-center gap-1 px-2 py-1 bg-amber-950/70 hover:bg-amber-900 text-amber-300 rounded-lg text-[11px] font-bold border border-amber-700/60 transition-colors"
+                              >
+                                <ShieldAlert className="w-3 h-3 text-amber-400" />
+                                <span>除外設定</span>
+                              </button>
+                            ) : (
+                              <span className="text-slate-500 text-[11px]">除外中</span>
+                            )}
+
+                            {ord.status !== 'fulfilled' && !alreadyIgnored && (
                               <button
                                 onClick={() => handleStatusChange(ord.id, 'fulfilled')}
                                 title="手動で完納にする"
@@ -667,6 +831,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                                 <Check className="w-3.5 h-3.5" />
                               </button>
                             )}
+
                             <button
                               onClick={() => handleDeleteOrder(ord.id)}
                               title="削除"
@@ -713,7 +878,67 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
         )}
       </div>
 
-      {/* 詳細モーダル */}
+      {/* 除外マスタ設定モーダル */}
+      {showIgnoredMasterModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-5 text-slate-200">
+            <div className="flex items-start justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5 text-amber-400" />
+                <h3 className="text-lg font-black text-white">自動除外対象品目マスタ</h3>
+              </div>
+              <button 
+                onClick={() => setShowIgnoredMasterModal(false)}
+                className="text-slate-400 hover:text-white font-bold p-1 rounded-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400">
+              ここに登録されている商品は、次回以降の発注CSVインポート時に自動的に管理対象外としてスキップされます。
+            </p>
+
+            <div className="max-h-[350px] overflow-y-auto space-y-2 custom-scrollbar">
+              {ignoredItems.length === 0 ? (
+                <div className="p-8 text-center text-slate-500 text-xs font-bold">
+                  除外マスタに登録されている品目はまだありません。
+                </div>
+              ) : (
+                ignoredItems.map(item => (
+                  <div key={item.id} className="flex items-center justify-between bg-slate-800/80 p-3 rounded-xl border border-slate-700/60 text-xs">
+                    <div>
+                      <div className="font-bold text-white text-sm">{item.name}</div>
+                      <div className="text-slate-400 text-[11px] flex gap-3 mt-0.5">
+                        {item.jan_code && <span>JAN: {item.jan_code}</span>}
+                        <span>理由: {item.reason || '一般品・自費品'}</span>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => handleRemoveFromIgnored(item.id)}
+                      className="px-3 py-1 bg-rose-950/70 hover:bg-rose-900 text-rose-300 text-xs font-bold rounded-lg border border-rose-800/60 transition-colors"
+                    >
+                      解除（復元）
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="flex justify-end border-t border-slate-800 pt-3">
+              <button
+                onClick={() => setShowIgnoredMasterModal(false)}
+                className="bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs px-5 py-2 rounded-xl border border-slate-700"
+              >
+                閉じる
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 発注詳細モーダル */}
       {selectedOrderForDetail && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-5 text-slate-200">
@@ -785,7 +1010,18 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               </div>
             )}
 
-            <div className="flex justify-end">
+            <div className="flex justify-between items-center border-t border-slate-800 pt-3">
+              <button
+                onClick={() => {
+                  handleAddToIgnored(selectedOrderForDetail.order);
+                  setSelectedOrderForDetail(null);
+                }}
+                className="flex items-center gap-1.5 bg-amber-950/80 hover:bg-amber-900 text-amber-300 px-4 py-2 rounded-xl text-xs font-bold border border-amber-700/60 transition-colors"
+              >
+                <ShieldAlert className="w-4 h-4 text-amber-400" />
+                <span>次回から自動除外する</span>
+              </button>
+
               <button
                 onClick={() => setSelectedOrderForDetail(null)}
                 className="bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs px-5 py-2 rounded-xl border border-slate-700"
