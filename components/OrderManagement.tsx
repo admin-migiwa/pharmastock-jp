@@ -1052,75 +1052,76 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       </div>
 
       {/* フィルタ & 検索バー */}
-      <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-2xl shadow-lg space-y-3">
-        <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
-          {/* 検索入力 */}
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              placeholder="薬品名・規格・JANコード・メーカー・卸名で検索..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 text-white placeholder-slate-400 pl-9 pr-20 py-2 rounded-xl text-sm focus:outline-none focus:border-emerald-500 font-medium shadow-inner"
-            />
-            {searchQuery && (
-              <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
-                <span className="text-[10px] text-emerald-400 font-bold bg-emerald-950/80 border border-emerald-800/60 px-2 py-0.5 rounded-full">
-                  {filteredOrders.length}件
-                </span>
-                <button
-                  onClick={() => setSearchQuery('')}
-                  className="text-slate-400 hover:text-white hover:bg-slate-700 p-0.5 rounded-full transition-all"
-                  title="検索をクリア"
-                >
-                  ✕
-                </button>
-              </div>
-            )}
+      <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl shadow-xl space-y-4">
+        {/* 検索バー (画面横幅いっぱいの独立・最優先検索エリア) */}
+        <div className="relative w-full">
+          <Search className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            placeholder="🔍 薬品名・規格・JANコード・メーカー・納品先卸名でリアルタイム検索..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full bg-slate-800/90 border-2 border-slate-700 focus:border-emerald-500 text-white placeholder-slate-400 pl-11 pr-24 py-3 rounded-2xl text-sm md:text-base font-bold shadow-inner focus:outline-none transition-all"
+          />
+          {searchQuery && (
+            <div className="absolute right-3.5 top-1/2 -translate-y-1/2 flex items-center gap-2">
+              <span className="text-xs text-emerald-400 font-black bg-emerald-950 border border-emerald-700/80 px-2.5 py-1 rounded-full shadow">
+                {filteredOrders.length} 件ヒット
+              </span>
+              <button
+                onClick={() => setSearchQuery('')}
+                className="text-slate-400 hover:text-white hover:bg-slate-700 p-1 rounded-full transition-all text-xs font-bold"
+                title="検索をクリア"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* フィルタボタン群（2段目に余裕を持って配置） */}
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-slate-800/80">
+          {/* 表示期間選択 */}
+          <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700 text-xs font-bold">
+            <Calendar className="w-4 h-4 text-emerald-400" />
+            <span className="text-slate-300">表示期間:</span>
+            <select
+              value={dateRangeFilter}
+              onChange={(e) => setDateRangeFilter(e.target.value as any)}
+              className="bg-slate-900 text-xs text-white px-2.5 py-1 rounded-lg border border-slate-700 font-bold focus:outline-none focus:border-emerald-500 cursor-pointer"
+            >
+              <option value="all">全期間 (すべて表示)</option>
+              <option value="7days">直近1週間 (過去7日間)</option>
+              <option value="14days">直近2週間 (過去14日間)</option>
+              <option value="30days">直近1ヶ月 (過去30日間)</option>
+              <option value="90days">直近3ヶ月 (過去90日間)</option>
+              <option value="thisMonth">今月 (当月発注分)</option>
+              <option value="lastMonth">先月 (前月発注分)</option>
+              <option value="custom">日付指定 (期間入力)</option>
+            </select>
           </div>
 
-          {/* フィルタボタン群 */}
-          <div className="flex flex-wrap items-center gap-2">
-            {/* 表示期間選択 */}
-            <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1 rounded-xl border border-slate-700 text-xs font-bold">
-              <Calendar className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="text-slate-300">表示期間:</span>
-              <select
-                value={dateRangeFilter}
-                onChange={(e) => setDateRangeFilter(e.target.value as any)}
-                className="bg-slate-900 text-xs text-white px-2.5 py-1 rounded-lg border border-slate-700 font-bold focus:outline-none focus:border-emerald-500 cursor-pointer"
-              >
-                <option value="all">全期間 (すべて表示)</option>
-                <option value="7days">直近1週間 (過去7日間)</option>
-                <option value="14days">直近2週間 (過去14日間)</option>
-                <option value="30days">直近1ヶ月 (過去30日間)</option>
-                <option value="90days">直近3ヶ月 (過去90日間)</option>
-                <option value="thisMonth">今月 (当月発注分)</option>
-                <option value="lastMonth">先月 (前月発注分)</option>
-                <option value="custom">日付指定 (期間入力)</option>
-              </select>
+          {dateRangeFilter === 'custom' && (
+            <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700 text-xs font-bold">
+              <span className="text-slate-400">期間:</span>
+              <input
+                type="date"
+                value={customStartDate}
+                onChange={(e) => setCustomStartDate(e.target.value)}
+                className="bg-slate-900 text-xs text-white px-2 py-1 rounded-lg border border-slate-700 font-bold focus:outline-none focus:border-emerald-500"
+              />
+              <span className="text-slate-400">〜</span>
+              <input
+                type="date"
+                value={customEndDate}
+                onChange={(e) => setCustomEndDate(e.target.value)}
+                className="bg-slate-900 text-xs text-white px-2 py-1 rounded-lg border border-slate-700 font-bold focus:outline-none focus:border-emerald-500"
+              />
             </div>
+          )}
 
-            {dateRangeFilter === 'custom' && (
-              <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1 rounded-xl border border-slate-700 text-xs font-bold">
-                <span className="text-slate-400">期間:</span>
-                <input
-                  type="date"
-                  value={customStartDate}
-                  onChange={(e) => setCustomStartDate(e.target.value)}
-                  className="bg-slate-900 text-xs text-white px-2 py-1 rounded-lg border border-slate-700 font-bold focus:outline-none focus:border-emerald-500"
-                />
-                <span className="text-slate-400">〜</span>
-                <input
-                  type="date"
-                  value={customEndDate}
-                  onChange={(e) => setCustomEndDate(e.target.value)}
-                  className="bg-slate-900 text-xs text-white px-2 py-1 rounded-lg border border-slate-700 font-bold focus:outline-none focus:border-emerald-500"
-                />
-              </div>
-            )}
-
+          {/* ステータス絞り込み & オプションボタン */}
+          <div className="flex flex-wrap items-center gap-2">
             <div className="flex bg-slate-800 p-1 rounded-xl border border-slate-700">
               <button
                 onClick={() => setStatusFilter('all')}
@@ -1152,7 +1153,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                   statusFilter === 'candidate' ? 'bg-amber-600 text-white shadow' : 'text-amber-400 hover:text-white'
                 }`}
               >
-                <ShieldAlert className="w-3 h-3" />
+                <ShieldAlert className="w-3.5 h-3.5" />
                 <span>除外候補 ({stats.candidateCount})</span>
               </button>
               <button
@@ -1161,7 +1162,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                   statusFilter === 'cancelled' ? 'bg-slate-600 text-white shadow' : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <EyeOff className="w-3 h-3" />
+                <EyeOff className="w-3.5 h-3.5" />
                 <span>除外済み</span>
               </button>
             </div>
