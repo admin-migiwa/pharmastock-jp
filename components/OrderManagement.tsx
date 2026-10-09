@@ -1052,38 +1052,12 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       </div>
 
       {/* フィルタ & 検索バー */}
-      <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl shadow-xl space-y-4">
-        {/* 検索バー (画面横幅いっぱいの独立・最優先検索エリア) */}
-        <div className="relative w-full">
-          <Search className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            placeholder="🔍 薬品名・規格・JANコード・メーカー・納品先卸名でリアルタイム検索..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-slate-800/90 border-2 border-slate-700 focus:border-emerald-500 text-white placeholder-slate-400 pl-11 pr-24 py-3 rounded-2xl text-sm md:text-base font-bold shadow-inner focus:outline-none transition-all"
-          />
-          {searchQuery && (
-            <div className="absolute right-3.5 top-1/2 -translate-y-1/2 flex items-center gap-2">
-              <span className="text-xs text-emerald-400 font-black bg-emerald-950 border border-emerald-700/80 px-2.5 py-1 rounded-full shadow">
-                {filteredOrders.length} 件ヒット
-              </span>
-              <button
-                onClick={() => setSearchQuery('')}
-                className="text-slate-400 hover:text-white hover:bg-slate-700 p-1 rounded-full transition-all text-xs font-bold"
-                title="検索をクリア"
-              >
-                ✕
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* フィルタボタン群（2段目に余裕を持って配置） */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-slate-800/80">
+      <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-2xl shadow-xl space-y-3">
+        {/* 1段目: フィルタボタン群（表示期間・ステータス絞り込み・出荷調整） */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
           {/* 表示期間選択 */}
           <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700 text-xs font-bold">
-            <Calendar className="w-4 h-4 text-emerald-400" />
+            <Calendar className="w-3.5 h-3.5 text-emerald-400" />
             <span className="text-slate-300">表示期間:</span>
             <select
               value={dateRangeFilter}
@@ -1189,6 +1163,32 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               </button>
             )}
           </div>
+        </div>
+
+        {/* 2段目: 薬品名検索窓（検索条件の下側に全幅配置、標準文字サイズ） */}
+        <div className="relative w-full pt-2 border-t border-slate-800/80">
+          <Search className="w-4 h-4 absolute left-3 top-1/2 translate-y-[2px] -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            placeholder="薬品名・規格・JANコード・メーカー・納品先卸名で検索..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full bg-slate-800 border border-slate-700 focus:border-emerald-500 text-white placeholder-slate-400 pl-9 pr-20 py-2 rounded-xl text-xs font-bold shadow-inner focus:outline-none transition-all"
+          />
+          {searchQuery && (
+            <div className="absolute right-3 top-1/2 translate-y-[2px] -translate-y-1/2 flex items-center gap-1.5">
+              <span className="text-[10px] text-emerald-400 font-bold bg-emerald-950/80 border border-emerald-800/60 px-2 py-0.5 rounded-full">
+                {filteredOrders.length}件
+              </span>
+              <button
+                onClick={() => setSearchQuery('')}
+                className="text-slate-400 hover:text-white hover:bg-slate-700 p-0.5 rounded-full transition-all text-xs font-bold"
+                title="検索をクリア"
+              >
+                ✕
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
