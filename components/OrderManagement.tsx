@@ -102,11 +102,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       .select('*')
       .eq('store_id', currentStoreId);
 
-    const existingMap = new Map<string, Order>();
-    (existingDbOrders as Order[] || []).forEach(o => {
-      const key = `${o.store_id}_${o.order_date}_${o.jan_code}_${o.order_qty}`;
-      existingMap.set(key, o);
-    });
+    const existingPool = [...((existingDbOrders as Order[]) || [])];
 
     let totalImported = 0;
     let skippedCount = 0;
@@ -123,11 +119,18 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
         const inserts: Omit<Order, 'id'>[] = [];
 
         parsedRows.forEach(r => {
-          const key = `${currentStoreId}_${r.order_date}_${r.jan_code}_${r.order_qty}`;
-          const existing = existingMap.get(key);
+          // 既存DBの中から「店舗・発注日・JAN・発注数量」が一致する未使用レコードを探す
+          const matchIdx = existingPool.findIndex(o => 
+            o.store_id === currentStoreId &&
+            o.order_date === r.order_date &&
+            o.jan_code === r.jan_code &&
+            o.order_qty === r.order_qty
+          );
 
-          if (existing) {
-            // 既存データがある場合はIDを指定して更新（完了状態などは維持）
+          if (matchIdx !== -1) {
+            const existing = existingPool[matchIdx];
+            existingPool.splice(matchIdx, 1); // マッチしたものは1対1で消費
+
             if (existing.status === 'fulfilled' || existing.status === 'partial') {
               skippedCount++;
             }
@@ -152,7 +155,6 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               updated_at: new Date().toISOString()
             });
           } else {
-            // 新規データは id プロパティを含めずに insert 用配列へ追加 (Supabase側でgen_random_uuid生成)
             inserts.push({
               store_id: currentStoreId,
               order_date: r.order_date,

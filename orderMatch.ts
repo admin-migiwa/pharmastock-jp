@@ -57,18 +57,29 @@ export const parseOrderCsv = (csvText: string): ParsedOrderRow[] => {
   if (lines.length < 2) throw new Error('発注CSVデータが空かヘッダーがありません');
 
   const headers = splitCsvLine(lines[0]).map(toStr);
-  const getColIdx = (keywords: string[]) => headers.findIndex(h => keywords.some(k => h.includes(k)));
+
+  const getColIdx = (exactNames: string[], keywords: string[]) => {
+    let idx = headers.findIndex(h => exactNames.includes(h.trim()));
+    if (idx !== -1) return idx;
+    return headers.findIndex(h => 
+      keywords.some(k => h.includes(k)) && 
+      !/最終|累積|単位|薬価|金額/.test(h)
+    );
+  };
 
   const idx = {
-    orderDate: getColIdx(['発注日時(日付)', '発注日', '日付']),
-    orderTime: getColIdx(['発注日時(時間)', '時間', '時刻']),
-    name: getColIdx(['品名', '商品名', '薬品名']),
-    spec: getColIdx(['規格容量', '規格']),
-    maker: getColIdx(['メーカー名', 'メーカー', '製造会社']),
-    code: getColIdx(['商品コード', 'JANコード', 'コード']),
-    qty: getColIdx(['発注数量', '数量', '発注数']),
-    supplier: getColIdx(['発注先卸名', '卸名', '発注先']),
-    deliveryDate: getColIdx(['納品指定日', '指定日', '納品日']),
+    orderDate: getColIdx(['発注日時(日付)', '発注日', '日付'], ['発注日', '日付']),
+    orderTime: getColIdx(['発注日時(時間)', '時間', '時刻'], ['時間', '時刻']),
+    name: getColIdx(['品名', '商品名', '薬品名'], ['品名', '商品名', '薬品名']),
+    spec: getColIdx(['規格容量', '規格'], ['規格']),
+    maker: getColIdx(['メーカー名', 'メーカー', '製造会社'], ['メーカー', '製造']),
+    code: getColIdx(['商品コード', 'JANコード', 'コード'], ['商品コード', 'JAN', 'コード']),
+    qty: getColIdx(
+      ['発注数量', '発注数', '注文数量', '注文数', '発注箱数', '数量', '箱数'],
+      ['発注数', '注文数', '箱数', '数量']
+    ),
+    supplier: getColIdx(['発注先卸名', '卸名', '発注先'], ['卸名', '発注先', '卸']),
+    deliveryDate: getColIdx(['納品指定日', '指定日', '納品日'], ['指定日', '納品日']),
   };
 
   if (idx.name === -1 || idx.code === -1 || idx.qty === -1) {
@@ -145,7 +156,7 @@ export const getDelayBadge = (order: Order): DelayBadgeInfo => {
 };
 
 /**
- * 発注と入庫履歴（purchase_history）の消し込みロジック
+ * 発注と入庫履歴（purchase_history）の消し込みロジック (FIFO順アロケーション)
  */
 export const reconcileOrders = async (storeId: string, marginDays = 7) => {
   const { data: allOrders, error: orderErr } = await supabase
@@ -153,7 +164,8 @@ export const reconcileOrders = async (storeId: string, marginDays = 7) => {
     .select('*')
     .eq('store_id', storeId)
     .neq('status', 'cancelled')
-    .order('order_date', { ascending: true });
+    .order('order_date', { ascending: true })
+    .order('created_at', { ascending: true });
 
   if (orderErr) throw orderErr;
   if (!allOrders || allOrders.length === 0) return { updatedCount: 0 };
@@ -167,6 +179,31 @@ export const reconcileOrders = async (storeId: string, marginDays = 7) => {
   if (purErr) throw purErr;
   const purList = purchases || [];
 
+  // 入庫履歴をプールに変換（箱数単位への換算 + 残数トラッキング）
+  const purchasePool = purList.map(p => {
+    const q = Number(p.quantity) || 1;
+    let boxes = 1;
+    if (q <= 50) {
+      boxes = q;
+    } else if (q % 100 === 0) {
+      boxes = q / 100;
+    } else if (q % 42 === 0) {
+      boxes = q / 42;
+    } else if (q % 84 === 0) {
+      boxes = q / 84;
+    } else {
+      boxes = Math.max(1, Math.round(q / 100));
+    }
+
+    return {
+      id: p.id,
+      purchase_date: p.purchase_date,
+      jan_code: normalizeJanCode(p.yakka_code || (p as any).jan_code),
+      name_key: normalizeName(p.name),
+      available_boxes: boxes,
+    };
+  });
+
   const todayStr = new Date().toISOString().slice(0, 10);
   const updates: Partial<Order>[] = [];
 
@@ -176,33 +213,38 @@ export const reconcileOrders = async (storeId: string, marginDays = 7) => {
     maxDate.setDate(maxDate.getDate() + marginDays);
     const maxDateStr = maxDate.toISOString().slice(0, 10);
 
-    const matches = purList.filter(p => {
-      const pDate = p.purchase_date;
-      if (pDate < ord.order_date || pDate > maxDateStr) return false;
-
-      // JAN一致または品名正規化一致
-      const janP = normalizeJanCode(p.yakka_code || p.jan_code);
-      if (ord.jan_code && janP && ord.jan_code === janP) return true;
-      if (ord.name_key && normalizeName(p.name) === ord.name_key) return true;
-      return false;
-    });
-
-    let deliveredBoxQty = 0;
+    let needed = ord.order_qty;
+    let allocatedBoxQty = 0;
     let firstDelivDate: string | null = null;
 
-    if (matches.length > 0) {
-      firstDelivDate = matches[0].purchase_date;
-      // 数量の概算（同じ日のものは集約されている可能性を考慮）
-      deliveredBoxQty = matches.length; 
+    for (const poolItem of purchasePool) {
+      if (needed <= 0) break;
+      if (poolItem.available_boxes <= 0) continue;
+      if (poolItem.purchase_date < ord.order_date || poolItem.purchase_date > maxDateStr) continue;
+
+      // JAN一致または正規化名称一致
+      const janMatch = ord.jan_code && poolItem.jan_code && ord.jan_code === poolItem.jan_code;
+      const nameMatch = ord.name_key && poolItem.name_key && ord.name_key === poolItem.name_key;
+
+      if (janMatch || nameMatch) {
+        const take = Math.min(needed, poolItem.available_boxes);
+        allocatedBoxQty += take;
+        needed -= take;
+        poolItem.available_boxes -= take;
+
+        if (!firstDelivDate && take > 0) {
+          firstDelivDate = poolItem.purchase_date;
+        }
+      }
     }
 
     let newStatus: OrderStatus = ord.status;
     let delayDays: number | null = ord.delay_days ?? null;
 
-    if (deliveredBoxQty >= ord.order_qty) {
+    if (allocatedBoxQty >= ord.order_qty) {
       newStatus = 'fulfilled';
       if (firstDelivDate) delayDays = diffDays(firstDelivDate, ord.delivery_date);
-    } else if (deliveredBoxQty > 0) {
+    } else if (allocatedBoxQty > 0) {
       newStatus = 'partial';
       if (firstDelivDate) delayDays = diffDays(firstDelivDate, ord.delivery_date);
     } else {
@@ -215,13 +257,13 @@ export const reconcileOrders = async (storeId: string, marginDays = 7) => {
 
     if (
       newStatus !== ord.status ||
-      deliveredBoxQty !== ord.delivered_qty ||
+      allocatedBoxQty !== ord.delivered_qty ||
       firstDelivDate !== ord.actual_delivery_date ||
       delayDays !== ord.delay_days
     ) {
       updates.push({
         id: ord.id,
-        delivered_qty: deliveredBoxQty,
+        delivered_qty: allocatedBoxQty,
         actual_delivery_date: firstDelivDate,
         delay_days: delayDays,
         status: newStatus,
