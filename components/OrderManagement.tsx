@@ -209,15 +209,26 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       const reader = new FileReader();
       reader.onload = (e) => {
         const buffer = e.target?.result as ArrayBuffer;
-        // Shift_JIS でまずトライ
+        // Shift_JIS (CP932) でまずデコード
         const sjisDecoder = new TextDecoder('shift-jis');
-        let text = sjisDecoder.decode(buffer);
-        // 文字化け判定
-        if (text.includes('') || !/発注|商品|品名|日付|指定日|コード|数量/.test(text)) {
-          const utf8Decoder = new TextDecoder('utf-8');
-          text = utf8Decoder.decode(buffer);
+        const sjisText = sjisDecoder.decode(buffer);
+
+        // ヘッダーや主要キーワード（発注、品名、商品コード、数量等）が解読できていれば Shift_JIS と判定
+        if (/発注|品名|商品コード|発注数量|納品/.test(sjisText) && !sjisText.includes('\uFFFD')) {
+          resolve(sjisText);
+          return;
         }
-        resolve(text);
+
+        // そうでなければ UTF-8 で試行
+        const utf8Decoder = new TextDecoder('utf-8');
+        const utf8Text = utf8Decoder.decode(buffer);
+        if (/発注|品名|商品コード|発注数量|納品/.test(utf8Text)) {
+          resolve(utf8Text);
+          return;
+        }
+
+        // キーワードが見つからない場合はデフォルトで Shift_JIS の解読結果を採用
+        resolve(sjisText);
       };
       reader.onerror = (err) => reject(err);
       reader.readAsArrayBuffer(file);
