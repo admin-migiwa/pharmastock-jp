@@ -971,9 +971,9 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
       {/* 除外候補の確認・一括登録モーダル */}
       {showCandidateModal && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-5 text-slate-200">
-            <div className="flex items-start justify-between border-b border-slate-800 pb-3">
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-3xl w-full max-h-[85vh] flex flex-col p-6 shadow-2xl text-slate-200">
+            <div className="flex items-start justify-between border-b border-slate-800 pb-3 flex-shrink-0">
               <div className="flex items-center gap-2">
                 <ShieldAlert className="w-6 h-6 text-amber-400" />
                 <div>
@@ -992,7 +992,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
             </div>
 
             {/* チェック一括操作 */}
-            <div className="flex items-center justify-between bg-slate-800/80 p-3 rounded-xl border border-slate-700/60 text-xs font-bold">
+            <div className="flex items-center justify-between bg-slate-800/80 p-3 rounded-xl border border-slate-700/60 text-xs font-bold flex-shrink-0 my-3">
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => {
@@ -1022,10 +1022,10 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               </div>
             </div>
 
-            {/* 候補商品一覧テーブル */}
-            <div className="max-h-[380px] overflow-y-auto custom-scrollbar border border-slate-800 rounded-xl">
+            {/* 候補商品一覧テーブル（内部可変スクロール） */}
+            <div className="flex-1 min-h-[150px] overflow-y-auto custom-scrollbar border border-slate-800 rounded-xl my-1">
               <table className="w-full text-left text-xs text-slate-200">
-                <thead className="bg-slate-800/90 text-slate-300 font-bold sticky top-0 border-b border-slate-700">
+                <thead className="bg-slate-800/90 text-slate-300 font-bold sticky top-0 border-b border-slate-700 z-10">
                   <tr>
                     <th className="py-2.5 px-3 text-center w-12">除外</th>
                     <th className="py-2.5 px-3">商品名</th>
@@ -1079,8 +1079,8 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               </table>
             </div>
 
-            {/* モーダルアクション */}
-            <div className="flex justify-between items-center border-t border-slate-800 pt-4">
+            {/* モーダルアクション（常に最下部に固定表示） */}
+            <div className="flex justify-between items-center border-t border-slate-800 pt-4 flex-shrink-0 mt-3">
               <button
                 onClick={() => setShowCandidateModal(false)}
                 className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs px-5 py-2.5 rounded-xl border border-slate-700"
