@@ -1405,11 +1405,14 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
                 <div className="flex items-center gap-1.5 text-xs font-bold text-slate-300 bg-slate-800/80 px-2.5 py-1 rounded-xl border border-slate-700">
                   <input
-                    type="number"
-                    min={1}
-                    max={totalPages}
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
                     value={pageInput}
-                    onChange={(e) => setPageInput(e.target.value)}
+                    onChange={(e) => {
+                      const converted = e.target.value.replace(/[０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/[^0-9]/g, '');
+                      setPageInput(converted);
+                    }}
                     onBlur={handlePageSubmit}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
@@ -1417,7 +1420,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                         (e.target as HTMLInputElement).blur();
                       }
                     }}
-                    className="w-14 bg-slate-900 text-center text-white text-xs font-bold py-0.5 rounded border border-slate-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    className="w-14 bg-slate-900 text-center text-white text-xs font-bold py-0.5 rounded border border-slate-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 font-mono"
                   />
                   <span className="text-slate-400">/ {totalPages} ページ</span>
                 </div>

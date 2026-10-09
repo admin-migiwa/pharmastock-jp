@@ -305,12 +305,13 @@
                         <td className="px-6 py-4 text-right">
                           {item.is_dead_stock ? (
                             <input
-                              type="number"
-                              min="0"
-                              step="any"
-                              max={item.stock_total}
+                              type="text"
+                              inputMode="decimal"
                               value={item.dead_stock_qty ?? item.stock_total}
-                              onChange={(e) => handleQtyChange(item.id, e.target.value, item.stock_total)}
+                              onChange={(e) => {
+                                const converted = e.target.value.replace(/[０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/[^0-9.]/g, '');
+                                handleQtyChange(item.id, converted, item.stock_total);
+                              }}
                               className="w-20 text-right font-black py-1.5 px-2 rounded-lg border-2 border-red-200 bg-red-50 text-red-700 focus:border-red-500 outline-none"
                             />
                           ) : (
@@ -386,13 +387,13 @@
                         <div className="col-span-2">
                           <div className="text-[9px] text-slate-400 uppercase font-black mb-1">不要数量</div>
                           <input
-                            type="number"
+                            type="text"
                             inputMode="decimal"
-                            min="0"
-                            step="any"
-                            max={item.stock_total}
                             value={item.dead_stock_qty ?? item.stock_total}
-                            onChange={(e) => handleQtyChange(item.id, e.target.value, item.stock_total)}
+                            onChange={(e) => {
+                              const converted = e.target.value.replace(/[０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/[^0-9.]/g, '');
+                              handleQtyChange(item.id, converted, item.stock_total);
+                            }}
                             className="w-full text-center font-black py-2 rounded-xl border-2 border-red-200 bg-red-50 text-red-700 focus:border-red-500 outline-none"
                           />
                         </div>

@@ -711,11 +711,14 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
 
                   <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700 bg-slate-100 px-2 py-1 rounded-xl border border-slate-200">
                     <input
-                      type="number"
-                      min={1}
-                      max={totalAdjustingPages}
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
                       value={adjustingPageInput}
-                      onChange={(e) => setAdjustingPageInput(e.target.value)}
+                      onChange={(e) => {
+                        const converted = e.target.value.replace(/[０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/[^0-9]/g, '');
+                        setAdjustingPageInput(converted);
+                      }}
                       onBlur={handleAdjustingPageSubmit}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
@@ -723,7 +726,7 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
                           (e.target as HTMLInputElement).blur();
                         }
                       }}
-                      className="w-12 bg-white text-center text-slate-900 text-xs font-bold py-0.5 rounded border border-slate-300 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                      className="w-12 bg-white text-center text-slate-900 text-xs font-bold py-0.5 rounded border border-slate-300 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono"
                     />
                     <span className="text-slate-500">/ {totalAdjustingPages} ページ</span>
                   </div>

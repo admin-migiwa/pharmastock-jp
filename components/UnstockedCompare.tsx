@@ -551,11 +551,13 @@ const UnstockedCompare: React.FC<Props> = ({ inventory, stores, currentStoreId, 
                   <td className="px-3 py-1 text-right">
                     <div className="inline-flex items-center justify-end space-x-1 w-full">
                       <input 
-                        type="number" 
-                        step="any"
+                        type="text" 
                         inputMode="decimal"
                         value={displayQty} 
-                        onChange={e => handleQuantityChange(entry.item.id, e.target.value)}
+                        onChange={e => {
+                          const converted = e.target.value.replace(/[０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/[^0-9.]/g, '');
+                          handleQuantityChange(entry.item.id, converted);
+                        }}
                         className={`w-20 text-right font-mono font-bold px-2 py-1 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                           isDirty 
                             ? 'bg-amber-50 border-amber-400 text-amber-900' 
