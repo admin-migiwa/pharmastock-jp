@@ -109,20 +109,31 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     fetchOrders();
   }, [currentStoreId]);
 
-  // 除外候補判定ヘルパー（OTC医薬品・検査薬・自費品・一般品）
-  const isExclusionCandidate = (ord: Order, lookup?: ShipmentLookup): boolean => {
-    // 1. OTC医薬品・検査薬・自費品・一般用医薬品の包括的キーワード
-    const candidateRegex = /ノルレボ|エラワン|チェックワン|ドゥーテスト|ハイテスター|妊娠|排卵|自費|OTC|一般用|テストキット|検査薬|第[1１2２3３]類|類医薬品|指定第|外用薬|消毒液|マスク|サプリ|栄養|食品|化粧|資生堂|カネボウ|コーセー|ロート|アラクス|パブロン|新ルル|ルル|ガスター10|ガスター１０|ロキソニンS|ロキソニンＳ|アレグラFX|アレグラＦＸ|リアップ|チョコラ|アリナミン|ビオフェルミン|太田胃散|キャベジン/i;
+  // 除外候補判定ヘルパー（一般用品・OTC医薬品・検査薬・雑品のみ判定）
+  const isExclusionCandidate = (ord: Order): boolean => {
+    const name = ord.name || '';
 
-    if (candidateRegex.test(ord.name)) return true;
+    // 1. 医療用医薬品のメーカー表記「トーワ」「サワイ」等や特定成分・規格が含まれるものは保護
+    const hasEthicalMakerTag = /「[ァ-ヴ一-龠a-zA-Z0-9]+」/.test(name);
+    // 2. 医療用医薬品に特有の標準剤形・単位表現（錠, カプセル, 散, 軟膏, 点眼液 等）
+    const hasEthicalDosage = /錠|カプセル|散|細粒|顆粒|シロップ|ドライシロップ|ＤＳ|DS|軟膏|クリーム|ローション|テープ|パッチ|点眼|点耳|点鼻|吸入|注射|坐剤|ＯＤ錠|OD錠/;
 
-    // 2. 厚労省の医療用医薬品マスタ（shipment_status）に一切ヒットしない商品 (kind === 'none')
-    // （OTC医薬品や検査薬・雑貨等は医療用医薬品マスタに存在しないため kind === 'none'）
-    if (lookup && lookup.kind === 'none') {
-      const isValidYj = /^[0-9A-Za-z]{12}$/.test((ord.yakka_code || ord.jan_code || '').trim());
-      if (!isValidYj) return true;
+    // ノルレボ・チェックワン・OTC医薬品・検査薬・雑貨に特化した高精度キーワード
+    const specificOtcKeywords = /ノルレボ|エラワン|チェックワン|ドゥーテスト|ハイテスター|排卵日|妊娠検査|自費|OTC|一般用|テストキット|検査薬|第[1１2２3３]類|類医薬品|指定第|外用薬|消毒液|マスク|サプリ|栄養|食品|化粧|資生堂|カネボウ|コーセー|ロート|アラクス|パブロン|新ルル|ルル|ガスター10|ガスター１０|ロキソニンS|ロキソニンＳ|アレグラFX|アレグラＦＸ|リアップ|チョコラ|アリナミン|ビオフェルミン|太田胃散|キャベジン/i;
+
+    // 明示的なOTC・自費品キーワードに一致する場合
+    if (specificOtcKeywords.test(name)) {
+      // ノルレボ、チェックワン、第N類医薬品、自費、OTC等は剤形に関わらず候補
+      if (/ノルレボ|エラワン|チェックワン|ドゥーテスト|ハイテスター|自費|OTC|第[1１2２3３]類|類医薬品|指定第/i.test(name)) {
+        return true;
+      }
+      // それ以外のキーワードで医療用メーカー表記「...」があれば医療用医薬品として保護
+      if (!hasEthicalMakerTag) {
+        return true;
+      }
     }
 
+    // キンダベート、EPL、サンテなど過去・削除済みの医療用医薬品は一般品と誤認めないよう安全に保護
     return false;
   };
 
@@ -139,7 +150,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     const candidateOrders = orders.filter(o => 
       o.status !== 'cancelled' && 
       !isAlreadyIgnored(o) && 
-      isExclusionCandidate(o, shipmentMap.get(o.id))
+      isExclusionCandidate(o)
     );
 
     if (candidateOrders.length === 0) {
@@ -452,8 +463,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
       // 除外候補フィルタ
       if (statusFilter === 'candidate') {
-        const lk = shipmentMap.get(ord.id);
-        if (!isExclusionCandidate(ord, lk) || ord.status === 'cancelled') return false;
+        if (!isExclusionCandidate(ord) || ord.status === 'cancelled') return false;
         return true;
       }
 
@@ -496,8 +506,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
     let candidateCount = 0;
     activeOrders.forEach(o => {
-      const lk = shipmentMap.get(o.id);
-      if (isExclusionCandidate(o, lk)) candidateCount++;
+      if (isExclusionCandidate(o)) candidateCount++;
     });
 
     let adjustingCount = 0;
@@ -749,7 +758,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                     const delayBadge = getDelayBadge(ord);
                     const shipmentLk = shipmentMap.get(ord.id);
                     const shipmentBadge = shipmentLk ? getShipmentBadge(shipmentLk.rows) : null;
-                    const candidate = isExclusionCandidate(ord, shipmentLk);
+                    const candidate = isExclusionCandidate(ord);
                     const alreadyIgnored = isAlreadyIgnored(ord) || ord.status === 'cancelled';
 
                     return (
