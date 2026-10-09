@@ -621,6 +621,23 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
   // ページネーション
   const totalPages = Math.ceil(filteredOrders.length / itemsPerPage) || 1;
+  const [pageInput, setPageInput] = useState<string>('1');
+
+  useEffect(() => {
+    setPageInput(String(currentPage));
+  }, [currentPage]);
+
+  const handlePageSubmit = () => {
+    const parsed = parseInt(pageInput, 10);
+    if (isNaN(parsed)) {
+      setPageInput(String(currentPage));
+      return;
+    }
+    const clamped = Math.max(1, Math.min(totalPages, parsed));
+    setCurrentPage(clamped);
+    setPageInput(String(clamped));
+  };
+
   const paginatedOrders = useMemo(() => {
     const start = (currentPage - 1) * itemsPerPage;
     return filteredOrders.slice(start, start + itemsPerPage);
@@ -1034,17 +1051,36 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                 <button
                   onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                   disabled={currentPage === 1}
-                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800"
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800 transition-colors"
+                  title="前ページ"
                 >
                   <ChevronLeft className="w-4 h-4" />
                 </button>
-                <span className="text-xs font-bold text-slate-300 px-2">
-                  {currentPage} / {totalPages}
-                </span>
+
+                <div className="flex items-center gap-1.5 text-xs font-bold text-slate-300 bg-slate-800/80 px-2.5 py-1 rounded-xl border border-slate-700">
+                  <input
+                    type="number"
+                    min={1}
+                    max={totalPages}
+                    value={pageInput}
+                    onChange={(e) => setPageInput(e.target.value)}
+                    onBlur={handlePageSubmit}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        handlePageSubmit();
+                        (e.target as HTMLInputElement).blur();
+                      }
+                    }}
+                    className="w-14 bg-slate-900 text-center text-white text-xs font-bold py-0.5 rounded border border-slate-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                  />
+                  <span className="text-slate-400">/ {totalPages} ページ</span>
+                </div>
+
                 <button
                   onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                   disabled={currentPage === totalPages}
-                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800"
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800 transition-colors"
+                  title="次ページ"
                 >
                   <ChevronRight className="w-4 h-4" />
                 </button>

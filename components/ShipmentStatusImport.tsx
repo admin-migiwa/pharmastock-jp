@@ -173,8 +173,26 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
   const [adjustingItems, setAdjustingItems] = useState<{ stock: RealtimeStock; shipment: ShipmentLookup }[]>([]);
   const [isAdjustingLoading, setIsAdjustingLoading] = useState<boolean>(false);
   const [adjustingPage, setAdjustingPage] = useState<number>(1);
+  const [adjustingPageInput, setAdjustingPageInput] = useState<string>('1');
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
   const ITEMS_PER_PAGE = 20;
+
+  const totalAdjustingPages = Math.ceil(adjustingItems.length / ITEMS_PER_PAGE) || 1;
+
+  useEffect(() => {
+    setAdjustingPageInput(String(adjustingPage));
+  }, [adjustingPage]);
+
+  const handleAdjustingPageSubmit = () => {
+    const parsed = parseInt(adjustingPageInput, 10);
+    if (isNaN(parsed)) {
+      setAdjustingPageInput(String(adjustingPage));
+      return;
+    }
+    const clamped = Math.max(1, Math.min(totalAdjustingPages, parsed));
+    setAdjustingPage(clamped);
+    setAdjustingPageInput(String(clamped));
+  };
 
   const currentStoreName = stores.find(s => s.id === storeId)?.name || '未設定の店舗';
 
@@ -639,12 +657,29 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
                   >
                     <ChevronLeft size={14} /> 前へ
                   </button>
-                  <span className="text-xs font-black text-slate-700 px-2">
-                    {adjustingPage} / {Math.ceil(adjustingItems.length / ITEMS_PER_PAGE)}
-                  </span>
+
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700 bg-slate-100 px-2 py-1 rounded-xl border border-slate-200">
+                    <input
+                      type="number"
+                      min={1}
+                      max={totalAdjustingPages}
+                      value={adjustingPageInput}
+                      onChange={(e) => setAdjustingPageInput(e.target.value)}
+                      onBlur={handleAdjustingPageSubmit}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          handleAdjustingPageSubmit();
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      className="w-12 bg-white text-center text-slate-900 text-xs font-bold py-0.5 rounded border border-slate-300 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                    <span className="text-slate-500">/ {totalAdjustingPages} ページ</span>
+                  </div>
+
                   <button
-                    onClick={() => setAdjustingPage(p => Math.min(Math.ceil(adjustingItems.length / ITEMS_PER_PAGE), p + 1))}
-                    disabled={adjustingPage >= Math.ceil(adjustingItems.length / ITEMS_PER_PAGE)}
+                    onClick={() => setAdjustingPage(p => Math.min(totalAdjustingPages, p + 1))}
+                    disabled={adjustingPage >= totalAdjustingPages}
                     className="p-2 rounded-xl bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all font-bold text-xs flex items-center gap-1"
                   >
                     次へ <ChevronRight size={14} />
