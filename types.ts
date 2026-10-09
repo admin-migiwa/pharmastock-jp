@@ -134,4 +134,30 @@ export interface ShipmentLookup {
   rows: ShipmentStatus[];
 }
 
-export type ViewType = 'dashboard' | 'realtime_search' | 'inventory' | 'adoption' | 'realtime_import' | 'expiry_import' | 'shipment_import' | 'import' | 'stores' | 'manual' | 'unstocked_compare';
+export type OrderStatus = 'pending' | 'partial' | 'fulfilled' | 'delayed' | 'cancelled';
+
+export interface Order {
+  id: string;
+  store_id: string;
+  order_date: string;
+  order_time?: string | null;
+  delivery_date: string;
+  actual_delivery_date?: string | null;
+  delay_days?: number | null;
+  jan_code: string;
+  yakka_code?: string | null;
+  name: string;
+  name_key?: string | null;
+  spec?: string | null;
+  maker?: string | null;
+  supplier?: string | null;
+  order_qty: number;
+  delivered_qty: number;
+  status: OrderStatus;
+  source_file?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type ViewType = 'dashboard' | 'realtime_search' | 'inventory' | 'adoption' | 'realtime_import' | 'expiry_import' | 'shipment_import' | 'order_management' | 'import' | 'stores' | 'manual' | 'unstocked_compare';
+

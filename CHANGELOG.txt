@@ -2,6 +2,19 @@ PharmaStock JP - CHANGELOG
 （新しい変更ほど上に追記してください）
 ========================================
 
+【20pharmastock-jp】20261009_発注履歴インポートと未納品・納品遅延・出荷調整可視化機能の追加
+対象: OrderManagement.tsx(新規) / orderMatch.ts(新規) / supabase/orders.sql(新規) / types.ts / App.tsx
+
+- 新メニュー「発注・未納品管理」（在庫更新）：発注履歴CSV (hachu_XXXXX.csv) のインポート・自動パース
+- 入庫履歴 (purchase_history) との自動照合（発注日〜指定日+N日スライディングウィンドウ方式）
+- 納品指定日からのズレ・遅れ（ラグ）の視覚化バッジ（定刻、+1〜+2日遅れ、+3日以上遅れ[調整疑い]、前倒し、経過未納）
+- 厚労省「出荷調整状況」データとの自動連携（供給停止／限定出荷／出荷量減少等の状況バッジ＆詳細表示）
+- 20件ごとのページネーション、各種ステータス・出荷調整フィルタ、キーワード検索機能
+- 手動ステータス更新・削除機能、詳細モーダル表示
+- 事前準備：Supabase SQL Editorで supabase/orders.sql を実行すること
+
+----------------------------------------
+
 【19pharmastock-jp】20261005_出荷状況インポート／在庫照会に出荷状況表示を追加
 対象: ShipmentStatusImport.tsx(新規) / shipmentMatch.ts(新規) / RealtimeSearch.tsx / App.tsx / types.ts / supabase/shipment_status.sql(新規)
 
