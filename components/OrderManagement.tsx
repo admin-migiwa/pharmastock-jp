@@ -25,12 +25,21 @@ import {
   CheckSquare,
   Square,
   Download,
-  Printer
+  Printer,
+  Truck,
+  Settings2
 } from 'lucide-react';
 import { Store, Order, OrderStatus, IgnoredOrderItem, ShipmentLookup } from '../types';
 import { supabase } from '../supabase';
 import { parseOrderCsv, reconcileOrders, getDelayBadge, DelayBadgeInfo } from '../orderMatch';
 import { lookupShipment, getShipmentBadge, normalizeName } from '../shipmentMatch';
+import { 
+  DeliveryRule, 
+  DEFAULT_DELIVERY_RULE, 
+  getDeliveryRule, 
+  saveDeliveryRule, 
+  calculateExpectedDeliveryDate 
+} from '../deliveryRule';
 
 const normalizeForSearch = (str: string): string => {
   if (!str) return '';
@@ -64,6 +73,11 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
   const [uploadMessage, setUploadMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [selectedOrderForDetail, setSelectedOrderForDetail] = useState<{ order: Order; shipment?: ShipmentLookup } | null>(null);
   const [showIgnoredMasterModal, setShowIgnoredMasterModal] = useState<boolean>(false);
+
+  // 納品ルール設定用ステート
+  const [deliveryRule, setDeliveryRule] = useState<DeliveryRule>(DEFAULT_DELIVERY_RULE);
+  const [showDeliveryRuleModal, setShowDeliveryRuleModal] = useState<boolean>(false);
+  const [tempRule, setTempRule] = useState<DeliveryRule>(DEFAULT_DELIVERY_RULE);
 
   // 一括除外確認モーダル用ステート
   const [showCandidateModal, setShowCandidateModal] = useState<boolean>(false);
@@ -126,8 +140,40 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
   };
 
   useEffect(() => {
+    if (currentStoreId) {
+      const rule = getDeliveryRule(currentStoreId);
+      setDeliveryRule(rule);
+      setTempRule(rule);
+    }
     fetchOrders();
   }, [currentStoreId]);
+
+  // 納品ルール設定モーダルを開く
+  const handleOpenDeliveryRuleModal = () => {
+    const rule = getDeliveryRule(currentStoreId);
+    setTempRule(rule);
+    setShowDeliveryRuleModal(true);
+  };
+
+  // 納品ルールの保存・再照合
+  const handleSaveDeliveryRule = async () => {
+    if (!currentStoreId) return;
+    saveDeliveryRule(currentStoreId, tempRule);
+    setDeliveryRule(tempRule);
+    setShowDeliveryRuleModal(false);
+    setUploadMessage({ type: 'success', text: '納品ルールを保存しました。新しいスケジュールで再照合を実行中...' });
+    
+    try {
+      setReconciling(true);
+      const res = await reconcileOrders(currentStoreId, marginDays, tempRule);
+      setUploadMessage({ type: 'success', text: `納品ルールを保存し、新スケジュールで再照合完了（${res.updatedCount} 件を更新）` });
+      await fetchOrders();
+    } catch (err: any) {
+      setUploadMessage({ type: 'error', text: `再照合に失敗しました: ${err.message}` });
+    } finally {
+      setReconciling(false);
+    }
+  };
 
   // 除外候補判定ヘルパー（一般用品・OTC医薬品・検査薬・雑品等の広域判定）
   const isExclusionCandidate = (ord: Order, lookup?: ShipmentLookup): boolean => {
@@ -278,7 +324,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
       // 3. 再照合を実行
       try {
-        await reconcileOrders(currentStoreId, marginDays);
+        await reconcileOrders(currentStoreId, marginDays, deliveryRule);
       } catch (rErr) {
         console.warn('Reconcile error after restore:', rErr);
       }
@@ -321,7 +367,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
       // 3. 再照合を実行
       try {
-        await reconcileOrders(currentStoreId, marginDays);
+        await reconcileOrders(currentStoreId, marginDays, deliveryRule);
       } catch (rErr) {
         console.warn('Reconcile error after order restore:', rErr);
       }
@@ -341,7 +387,9 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
     const headers = [
       '発注日',
-      '納品指定日',
+      '発注時刻',
+      '予定納品日(ルール計算)',
+      '納品指定日(データ)',
       '実際の入庫日',
       '薬品名',
       '規格',
@@ -357,7 +405,8 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     ];
 
     const rows = filteredOrders.map(ord => {
-      const delayBadge = getDelayBadge(ord);
+      const delayBadge = getDelayBadge(ord, deliveryRule);
+      const expectedDate = delayBadge.expectedDate || calculateExpectedDeliveryDate(ord.order_date, ord.order_time, deliveryRule) || ord.delivery_date;
       const shipmentLk = shipmentMap.get(ord.id);
       const shipmentBadge = shipmentLk ? getShipmentBadge(shipmentLk.rows) : null;
       const alreadyIgnored = isAlreadyIgnored(ord) || ord.status === 'cancelled';
@@ -370,6 +419,8 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
       return [
         ord.order_date || '',
+        ord.order_time || '',
+        expectedDate,
         ord.delivery_date || '',
         ord.actual_delivery_date || '',
         ord.name || '',
@@ -421,7 +472,8 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     const today = new Date().toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' });
 
     const rowsHtml = filteredOrders.map(ord => {
-      const delayBadge = getDelayBadge(ord);
+      const delayBadge = getDelayBadge(ord, deliveryRule);
+      const expectedDate = delayBadge.expectedDate || calculateExpectedDeliveryDate(ord.order_date, ord.order_time, deliveryRule) || ord.delivery_date;
       const shipmentLk = shipmentMap.get(ord.id);
       const shipmentBadge = shipmentLk ? getShipmentBadge(shipmentLk.rows) : null;
       const alreadyIgnored = isAlreadyIgnored(ord) || ord.status === 'cancelled';
@@ -434,7 +486,11 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
       return `
         <tr>
-          <td>${ord.order_date}<br/><span style="color:#64748b;font-size:10px;">指定:${ord.delivery_date}</span></td>
+          <td>
+            <strong>${ord.order_date}</strong> ${ord.order_time ? '<small style="color:#64748b;">(' + ord.order_time.slice(0, 5) + ')</small>' : ''}<br/>
+            <span style="color:#059669;font-weight:bold;font-size:10px;">予定: ${expectedDate}</span>
+            ${ord.delivery_date !== expectedDate ? '<span style="color:#94a3b8;font-size:9px;text-decoration:line-through;">(' + ord.delivery_date + ')</span>' : ''}
+          </td>
           <td style="font-weight:bold;">${ord.name}<br/><span style="color:#64748b;font-size:10px;">${ord.spec || ''} ${ord.maker ? '(' + ord.maker + ')' : ''}</span></td>
           <td style="font-family:monospace;">${ord.jan_code}</td>
           <td>${ord.supplier || '-'}</td>
@@ -652,7 +708,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       setUploadMessage({ type: 'success', text: `${msg} 照合を実行中...` });
 
       try {
-        const result = await reconcileOrders(currentStoreId, marginDays);
+        const result = await reconcileOrders(currentStoreId, marginDays, deliveryRule);
         setUploadMessage({ type: 'success', text: `${msg} 照合完了（${result.updatedCount} 件を更新）` });
       } catch (rErr) {
         console.error('Auto reconcile error:', rErr);
@@ -696,7 +752,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     if (!currentStoreId) return;
     setReconciling(true);
     try {
-      const result = await reconcileOrders(currentStoreId, marginDays);
+      const result = await reconcileOrders(currentStoreId, marginDays, deliveryRule);
       setUploadMessage({ type: 'success', text: `照合を完了しました（更新: ${result.updatedCount} 件）` });
       await fetchOrders();
     } catch (err: any) {
@@ -935,6 +991,15 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
         {/* ボタン群 */}
         <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={handleOpenDeliveryRuleModal}
+            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-teal-300 border border-teal-500/40 text-xs font-bold px-3.5 py-2.5 rounded-xl shadow transition-all"
+            title="発注締め時刻・土日祝の納品なし条件などを設定"
+          >
+            <Truck className="w-4 h-4 text-teal-400" />
+            <span>納品ルール設定 ({deliveryRule.cutoff_time}締)</span>
+          </button>
+
           <button
             onClick={() => setShowIgnoredMasterModal(true)}
             className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 text-xs font-bold px-3.5 py-2.5 rounded-xl shadow transition-all"
@@ -1208,7 +1273,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               <table className="w-full text-left text-xs text-slate-200 border-collapse">
                 <thead>
                   <tr className="bg-slate-800/80 text-slate-300 font-bold border-b border-slate-700">
-                    <th className="py-3 px-4">発注日 / 指定日</th>
+                    <th className="py-3 px-4">発注日 / 予定納品日</th>
                     <th className="py-3 px-4">薬品名 / 規格 / メーカー</th>
                     <th className="py-3 px-4">JANコード</th>
                     <th className="py-3 px-4">発注先卸</th>
@@ -1220,7 +1285,8 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 font-medium">
                   {paginatedOrders.map((ord) => {
-                    const delayBadge = getDelayBadge(ord);
+                    const delayBadge = getDelayBadge(ord, deliveryRule);
+                    const expectedDate = delayBadge.expectedDate || calculateExpectedDeliveryDate(ord.order_date, ord.order_time, deliveryRule) || ord.delivery_date;
                     const shipmentLk = shipmentMap.get(ord.id);
                     const shipmentBadge = shipmentLk ? getShipmentBadge(shipmentLk.rows) : null;
                     const candidate = isExclusionCandidate(ord, shipmentLk);
@@ -1233,10 +1299,23 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                       >
                         {/* 日付 */}
                         <td className="py-3.5 px-4 whitespace-nowrap">
-                          <div className="font-bold text-white">{ord.order_date}</div>
-                          <div className="text-[11px] text-slate-400 flex items-center gap-1 mt-0.5">
-                            <span>指定:</span>
-                            <span className="font-semibold text-slate-300">{ord.delivery_date}</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-white">{ord.order_date}</span>
+                            {ord.order_time && (
+                              <span className="text-[10px] text-slate-400 font-mono bg-slate-800/90 px-1 py-0.5 rounded border border-slate-700/60" title={`発注時刻: ${ord.order_time}`}>
+                                {ord.order_time.slice(0, 5)}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] flex items-center gap-1.5 mt-0.5">
+                            <span className="text-emerald-400 font-bold" title="店舗ルールから計算した予定納品日">
+                              予定: {expectedDate}
+                            </span>
+                            {ord.delivery_date && ord.delivery_date !== expectedDate && (
+                              <span className="text-[10px] text-slate-500 line-through" title={`発注データ上の指定日: ${ord.delivery_date}`}>
+                                ({ord.delivery_date.slice(5)})
+                              </span>
+                            )}
                           </div>
                         </td>
 
@@ -1651,17 +1730,33 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
             <div className="grid grid-cols-2 gap-4 text-xs bg-slate-800/60 p-4 rounded-xl border border-slate-700/50">
               <div>
-                <span className="text-slate-400">発注日:</span>
-                <div className="font-bold text-white text-sm">{selectedOrderForDetail.order.order_date}</div>
+                <span className="text-slate-400">発注日時:</span>
+                <div className="font-bold text-white text-sm">
+                  {selectedOrderForDetail.order.order_date}
+                  {selectedOrderForDetail.order.order_time && (
+                    <span className="ml-1 text-xs font-mono text-slate-300">({selectedOrderForDetail.order.order_time})</span>
+                  )}
+                </div>
               </div>
               <div>
-                <span className="text-slate-400">納品指定日:</span>
-                <div className="font-bold text-white text-sm">{selectedOrderForDetail.order.delivery_date}</div>
+                <span className="text-slate-400">予定納品日 (ルール計算):</span>
+                <div className="font-bold text-emerald-400 text-sm">
+                  {calculateExpectedDeliveryDate(selectedOrderForDetail.order.order_date, selectedOrderForDetail.order.order_time, deliveryRule) || selectedOrderForDetail.order.delivery_date}
+                  {selectedOrderForDetail.order.delivery_date && (
+                    <span className="ml-1.5 text-xs font-normal text-slate-500 line-through">(指定: {selectedOrderForDetail.order.delivery_date})</span>
+                  )}
+                </div>
               </div>
               <div>
                 <span className="text-slate-400">納品数量 / 発注数量:</span>
                 <div className="font-bold text-emerald-400 text-sm">
                   {selectedOrderForDetail.order.delivered_qty} / {selectedOrderForDetail.order.order_qty}
+                </div>
+              </div>
+              <div>
+                <span className="text-slate-400">実際の入庫日:</span>
+                <div className="font-bold text-white text-sm">
+                  {selectedOrderForDetail.order.actual_delivery_date || '未納品'}
                 </div>
               </div>
               <div>
@@ -1672,7 +1767,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                 <span className="text-slate-400">JANコード:</span>
                 <div className="font-mono text-slate-300">{selectedOrderForDetail.order.jan_code}</div>
               </div>
-              <div>
+              <div className="col-span-2">
                 <span className="text-slate-400">取り込み元ファイル:</span>
                 <div className="text-slate-300 truncate">{selectedOrderForDetail.order.source_file || '-'}</div>
               </div>
@@ -1722,6 +1817,190 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
               >
                 閉じる
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🚚 納品ルール設定モーダル */}
+      {showDeliveryRuleModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-700 rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5 text-white max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-teal-500/10 border border-teal-500/30 text-teal-400">
+                  <Truck className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black tracking-wide">店舗別 納品ルール設定</h3>
+                  <p className="text-[11px] text-slate-400">配送スケジュール・締め時間・休業曜日</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowDeliveryRuleModal(false)}
+                className="text-slate-400 hover:text-white text-lg font-bold p-1 rounded-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="text-xs text-slate-300 space-y-1 bg-slate-800/60 p-3.5 rounded-2xl border border-slate-700/60">
+              <div className="font-black text-teal-300 flex items-center gap-1.5">
+                <Building2 className="w-4 h-4" />
+                <span>対象店舗: {currentStore?.name || '店舗'}</span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed mt-1">
+                発注締め時刻や土日祝の納品なし条件を設定することで、金曜通常発注や木曜夜間発注の週明け納品が「遅れ・出荷調整疑い」と誤認されるのを防ぎます。
+              </p>
+            </div>
+
+            <div className="space-y-4 text-xs font-bold">
+              {/* 発注締め時刻 */}
+              <div className="space-y-1.5 bg-slate-800/40 p-3 rounded-2xl border border-slate-700/50">
+                <label className="text-slate-200 block text-xs">
+                  当日発注の締め時刻 (カットオフ時間):
+                </label>
+                <div className="flex items-center gap-2 mt-1">
+                  <input
+                    type="time"
+                    value={tempRule.cutoff_time}
+                    onChange={(e) => setTempRule({ ...tempRule, cutoff_time: e.target.value })}
+                    className="bg-slate-900 border border-slate-600 rounded-xl px-3 py-1.5 text-white font-mono text-sm focus:outline-none focus:border-teal-500 shadow-inner"
+                  />
+                  <span className="text-slate-400 text-[11px]">
+                    ※自局の標準締め時間 (例: 18:30)
+                  </span>
+                </div>
+              </div>
+
+              {/* 締め前リードタイム */}
+              <div className="space-y-1.5 bg-slate-800/40 p-3 rounded-2xl border border-slate-700/50">
+                <label className="text-slate-200 block text-xs">
+                  締め時刻【前】の発注納品タイミング:
+                </label>
+                <select
+                  value={tempRule.lead_days_before_cutoff}
+                  onChange={(e) => setTempRule({ ...tempRule, lead_days_before_cutoff: Number(e.target.value) })}
+                  className="w-full bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-teal-500 mt-1 cursor-pointer"
+                >
+                  <option value={1}>翌営業日 納品 (翌日午前便 / 1営業日後) ★標準</option>
+                  <option value={0}>当日 納品 (当日午後便 / 0営業日後)</option>
+                  <option value={2}>2営業日後 納品</option>
+                </select>
+              </div>
+
+              {/* 締め後リードタイム */}
+              <div className="space-y-1.5 bg-slate-800/40 p-3 rounded-2xl border border-slate-700/50">
+                <label className="text-slate-200 block text-xs">
+                  締め時刻【後】の発注納品タイミング:
+                </label>
+                <select
+                  value={tempRule.lead_days_after_cutoff}
+                  onChange={(e) => setTempRule({ ...tempRule, lead_days_after_cutoff: Number(e.target.value) })}
+                  className="w-full bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-teal-500 mt-1 cursor-pointer"
+                >
+                  <option value={2}>2営業日後 納品 (翌々営業日) ★標準</option>
+                  <option value={1}>翌営業日 納品 (翌日)</option>
+                  <option value={3}>3営業日後 納品</option>
+                </select>
+              </div>
+
+              {/* 納品なし曜日 */}
+              <div className="space-y-1.5 bg-slate-800/40 p-3 rounded-2xl border border-slate-700/50">
+                <label className="text-slate-200 block text-xs">納品を行わない曜日 (休業曜日):</label>
+                <div className="grid grid-cols-7 gap-1.5 bg-slate-900/90 p-2.5 rounded-xl border border-slate-700 mt-1">
+                  {[
+                    { day: 0, label: '日' },
+                    { day: 1, label: '月' },
+                    { day: 2, label: '火' },
+                    { day: 3, label: '水' },
+                    { day: 4, label: '木' },
+                    { day: 5, label: '金' },
+                    { day: 6, label: '土' },
+                  ].map(({ day, label }) => {
+                    const isClosed = tempRule.non_delivery_weekdays.includes(day);
+                    return (
+                      <button
+                        type="button"
+                        key={day}
+                        onClick={() => {
+                          const next = isClosed
+                            ? tempRule.non_delivery_weekdays.filter(d => d !== day)
+                            : [...tempRule.non_delivery_weekdays, day];
+                          setTempRule({ ...tempRule, non_delivery_weekdays: next });
+                        }}
+                        className={`py-2 rounded-xl text-center font-bold text-xs transition-all ${
+                          isClosed
+                            ? 'bg-rose-950/80 text-rose-300 border border-rose-700/80 shadow'
+                            : 'bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700'
+                        }`}
+                      >
+                        <div className="text-xs">{label}</div>
+                        <div className={`text-[10px] mt-0.5 font-normal ${isClosed ? 'text-rose-400 font-bold' : 'text-slate-400'}`}>
+                          {isClosed ? '休業' : '納品あり'}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 祝日設定 */}
+              <div className="bg-slate-800/40 p-3 rounded-2xl border border-slate-700/50">
+                <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={tempRule.holiday_no_delivery}
+                    onChange={(e) => setTempRule({ ...tempRule, holiday_no_delivery: e.target.checked })}
+                    className="w-4 h-4 rounded text-teal-600 focus:ring-teal-500 bg-slate-900 border-slate-600 cursor-pointer"
+                  />
+                  <span className="text-slate-200 text-xs font-bold">
+                    国民の祝日・振替休日は納品なし（週明け・平日へ自動繰り延べ）
+                  </span>
+                </label>
+              </div>
+
+              {/* プレビュー・解説 */}
+              <div className="p-3.5 bg-teal-950/40 border border-teal-800/60 rounded-2xl text-[11px] text-teal-200 space-y-1.5 shadow-inner">
+                <div className="font-black flex items-center gap-1.5 text-teal-300">
+                  <Info className="w-4 h-4 text-teal-400" />
+                  <span>設定中の納品スケジュール・動作プレビュー:</span>
+                </div>
+                <div className="text-slate-300 pl-1 space-y-0.5">
+                  <div>・<strong>{tempRule.cutoff_time} までの発注:</strong> 翌営業日に到着（金曜発注は週明け月曜午前便）</div>
+                  <div>・<strong>{tempRule.cutoff_time} 以降の発注:</strong> 2営業日後に到着（木曜夜は週明け月曜、金曜夜は火曜納品）</div>
+                  <div>・土日・祝日は納品日にカウントされず、営業日基準で「定刻 (±0日)」が判定されます</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center border-t border-slate-800 pt-4">
+              <button
+                type="button"
+                onClick={() => setTempRule(DEFAULT_DELIVERY_RULE)}
+                className="text-xs text-slate-400 hover:text-slate-200 underline font-medium"
+              >
+                初期標準ルールに戻す
+              </button>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDeliveryRuleModal(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition-colors"
+                >
+                  キャンセル
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveDeliveryRule}
+                  disabled={reconciling}
+                  className="px-5 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-bold shadow-lg transition-all flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>ルールを保存して再照合</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

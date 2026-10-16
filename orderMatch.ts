@@ -117,6 +117,14 @@ export const parseOrderCsv = (csvText: string): ParsedOrderRow[] => {
   return rows;
 };
 
+import { 
+  DeliveryRule, 
+  DEFAULT_DELIVERY_RULE, 
+  calculateExpectedDeliveryDate, 
+  calculateDelayDays,
+  getDeliveryRule 
+} from './deliveryRule';
+
 /**
  * ２つの日付文字列 (YYYY-MM-DD) の差分日数 (dateA - dateB)
  */
@@ -133,33 +141,39 @@ export interface DelayBadgeInfo {
   label: string;
   level: 'on_time' | 'slight_delay' | 'severe_delay' | 'early' | 'pending_overdue' | 'pending';
   days: number;
+  expectedDate?: string;
 }
 
-export const getDelayBadge = (order: Order): DelayBadgeInfo => {
+export const getDelayBadge = (order: Order, rule: DeliveryRule = DEFAULT_DELIVERY_RULE): DelayBadgeInfo => {
   const todayStr = new Date().toISOString().slice(0, 10);
+
+  // 店舗の納品ルールから算出した「真の予定納品日」
+  const expectedDate = calculateExpectedDeliveryDate(order.order_date, order.order_time, rule) || order.delivery_date;
 
   // 納品済（完納・分納）の場合
   if (order.actual_delivery_date) {
-    const days = order.delay_days ?? diffDays(order.actual_delivery_date, order.delivery_date);
-    if (days === 0) return { label: '定刻 (±0日)', level: 'on_time', days };
-    if (days > 0 && days <= 2) return { label: `+${days}日遅れ`, level: 'slight_delay', days };
-    if (days > 2) return { label: `+${days}日遅れ (出荷調整疑い)`, level: 'severe_delay', days };
-    return { label: `${days}日 (早納)`, level: 'early', days };
+    // 予定納品日との差分で遅延を判定 (±0日は定刻着荷)
+    const days = calculateDelayDays(order.actual_delivery_date, expectedDate, rule);
+    if (days === 0) return { label: '定刻 (±0日)', level: 'on_time', days, expectedDate };
+    if (days > 0 && days <= 2) return { label: `+${days}日遅れ`, level: 'slight_delay', days, expectedDate };
+    if (days > 2) return { label: `+${days}日遅れ (出荷調整疑い)`, level: 'severe_delay', days, expectedDate };
+    return { label: `${days}日 (早納)`, level: 'early', days, expectedDate };
   }
 
-  // 未完了の場合
-  const daysOver = diffDays(todayStr, order.delivery_date);
+  // 未完了の場合 (今日と予定納品日との差分)
+  const daysOver = calculateDelayDays(todayStr, expectedDate, rule);
   if (daysOver > 0) {
-    return { label: `${daysOver}日経過 未納`, level: 'pending_overdue', days: daysOver };
+    return { label: `${daysOver}日経過 未納`, level: 'pending_overdue', days: daysOver, expectedDate };
   }
-  return { label: '入荷待ち', level: 'pending', days: 0 };
+  return { label: '入荷待ち', level: 'pending', days: 0, expectedDate };
 };
 
 /**
  * 発注と入庫履歴（purchase_history）の消し込みロジック
- * ※他店分譲（分譲受入）の記録は卸発注照合から完全に除外します。
+ * ※店舗ごとの配送ルール（締め時間・土日祝なし）に基づき予定日を算出し照合します。
  */
-export const reconcileOrders = async (storeId: string, marginDays = 7) => {
+export const reconcileOrders = async (storeId: string, marginDays = 7, customRule?: DeliveryRule) => {
+  const rule = customRule || getDeliveryRule(storeId);
   const { data: allOrders, error: orderErr } = await supabase
     .from('orders')
     .select('*')
@@ -217,8 +231,11 @@ export const reconcileOrders = async (storeId: string, marginDays = 7) => {
   const updates: Partial<Order>[] = [];
 
   for (const ord of allOrders as Order[]) {
-    // 期間フィルタ: 発注日 <= 入庫日 <= 指定日 + marginDays
-    const maxDate = new Date(ord.delivery_date);
+    // 店舗ルールに基づいた予定納品日を計算 (土日祝や発注締め時刻を考慮)
+    const expectedDate = calculateExpectedDeliveryDate(ord.order_date, ord.order_time, rule) || ord.delivery_date;
+
+    // 期間フィルタ: 発注日 <= 入庫日 <= 予定納品日 + marginDays
+    const maxDate = new Date(expectedDate);
     maxDate.setDate(maxDate.getDate() + marginDays);
     const maxDateStr = maxDate.toISOString().slice(0, 10);
 
@@ -260,12 +277,12 @@ export const reconcileOrders = async (storeId: string, marginDays = 7) => {
 
     if (allocatedBoxQty >= ord.order_qty) {
       newStatus = 'fulfilled';
-      if (firstDelivDate) delayDays = diffDays(firstDelivDate, ord.delivery_date);
+      if (firstDelivDate) delayDays = calculateDelayDays(firstDelivDate, expectedDate, rule);
     } else if (allocatedBoxQty > 0) {
       newStatus = 'partial';
-      if (firstDelivDate) delayDays = diffDays(firstDelivDate, ord.delivery_date);
+      if (firstDelivDate) delayDays = calculateDelayDays(firstDelivDate, expectedDate, rule);
     } else {
-      if (todayStr > ord.delivery_date) {
+      if (todayStr > expectedDate) {
         newStatus = 'delayed';
       } else {
         newStatus = 'pending';
