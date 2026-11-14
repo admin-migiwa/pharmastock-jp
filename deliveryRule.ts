@@ -5,6 +5,8 @@
  * 正確な「予定納品日」および「遅延日数」を算出します。
  */
 
+import { supabase } from './supabase';
+
 export interface DeliveryRule {
   store_id?: string;
   cutoff_time: string;           // 発注締め時刻 "18:30" (HH:mm)
@@ -12,9 +14,11 @@ export interface DeliveryRule {
   lead_days_after_cutoff: number;  // 締め後発注の所要営業日数 (通常: 2 = 翌々営業日)
   non_delivery_weekdays: number[]; // 納品なし曜日 (0:日曜, 1:月曜, ..., 6:土曜)
   holiday_no_delivery: boolean;    // 祝日は納品なしとするか
+  same_day_cutoff_time?: string | null; // 当日便の締め時刻 "12:00"。この時刻までの発注は当日納品（納品日に限る）。未設定なら当日便なし
 }
 
 export const DEFAULT_DELIVERY_RULE: DeliveryRule = {
+  same_day_cutoff_time: null,
   cutoff_time: '18:30',
   lead_days_before_cutoff: 1,
   lead_days_after_cutoff: 2,
@@ -160,6 +164,10 @@ export const isDeliveryDay = (date: Date, rule: DeliveryRule = DEFAULT_DELIVERY_
  * - 木曜 18:45 発注 (締め後: 所要2営業日) -> 金曜(1) + 土日スキップ -> 月曜納品
  * - 金曜 15:00 発注 (締め前: 所要1営業日) -> 土日スキップ -> 月曜納品
  * - 金曜 19:00 発注 (締め後: 所要2営業日) -> 土日スキップ -> 月曜(1) + 火曜(2) -> 火曜納品
+ *
+ * 当日便の締め時刻 12:00 を設定した場合（午後便のある卸）:
+ * - 木曜 11:30 発注 -> 木曜（当日）納品
+ * - 土曜 11:30 発注 (土曜は納品なし) -> 当日便は使えず、通常の締め前扱い -> 月曜納品
  */
 export const calculateExpectedDeliveryDate = (
   orderDateStr: string,
@@ -182,6 +190,15 @@ export const calculateExpectedDeliveryDate = (
       const cutoffMinutes = (cutoffH || 18) * 60 + (cutoffM || 30);
       if (orderMinutes > cutoffMinutes) {
         requiredLeadDays = rule.lead_days_after_cutoff;
+      }
+
+      // 当日便：当日便の締め時刻までの発注で、発注日が納品日なら当日着
+      const sameDay = (rule.same_day_cutoff_time || '').match(/(\d{1,2}):(\d{1,2})/);
+      if (sameDay) {
+        const sameDayMinutes = Number(sameDay[1]) * 60 + Number(sameDay[2]);
+        if (orderMinutes <= sameDayMinutes && isDeliveryDay(new Date(year, month - 1, day), rule)) {
+          requiredLeadDays = 0;
+        }
       }
     }
   }
@@ -247,4 +264,122 @@ export const saveDeliveryRule = (storeId: string, rule: DeliveryRule): void => {
   } catch (err) {
     console.warn('Error saving delivery rule to localStorage:', err);
   }
+};
+
+/* =====================================================================
+ * 卸ごとの納品ルール（データベース delivery_rules テーブルで全端末共有）
+ *
+ *  - 店舗の「基本ルール」 … supplier_key = ''（空文字）の行
+ *  - 卸ごとの「個別ルール」 … supplier_key = 正規化した卸名 の行
+ *  - 個別ルールがない卸の発注は、基本ルールで予定納品日を計算する
+ * ===================================================================== */
+
+export interface SupplierDeliveryRule extends DeliveryRule {
+  supplier_label: string; // 画面表示用の卸名（取込データ上の表記）
+}
+
+export interface DeliveryRuleSet {
+  base: DeliveryRule;
+  bySupplier: Record<string, SupplierDeliveryRule>; // キー = normalizeSupplier(卸名)
+}
+
+export const DELIVERY_RULES_TABLE = 'delivery_rules';
+
+// 卸名の表記ゆれをそろえる（全角半角統一・「株式会社」等の除去・空白除去）
+export const normalizeSupplier = (s: string | null | undefined): string =>
+  (s || '')
+    .normalize('NFKC')
+    .replace(/株式会社|\(株\)|㈱|有限会社|\(有\)/g, '')
+    .replace(/[\s　]/g, '')
+    .trim();
+
+// 発注の卸名から、使うべき納品ルールを選ぶ（個別ルールがなければ基本ルール）
+export const resolveDeliveryRule = (set: DeliveryRuleSet, supplier: string | null | undefined): DeliveryRule => {
+  const key = normalizeSupplier(supplier);
+  return (key && set.bySupplier[key]) || set.base;
+};
+
+const pickRule = (row: any): DeliveryRule => ({
+  store_id: row.store_id,
+  cutoff_time: row.cutoff_time || DEFAULT_DELIVERY_RULE.cutoff_time,
+  lead_days_before_cutoff: Number(row.lead_days_before_cutoff ?? DEFAULT_DELIVERY_RULE.lead_days_before_cutoff),
+  lead_days_after_cutoff: Number(row.lead_days_after_cutoff ?? DEFAULT_DELIVERY_RULE.lead_days_after_cutoff),
+  non_delivery_weekdays: Array.isArray(row.non_delivery_weekdays) ? row.non_delivery_weekdays.map(Number) : DEFAULT_DELIVERY_RULE.non_delivery_weekdays,
+  holiday_no_delivery: row.holiday_no_delivery ?? DEFAULT_DELIVERY_RULE.holiday_no_delivery,
+  same_day_cutoff_time: row.same_day_cutoff_time || null,
+});
+
+/**
+ * 店舗の納品ルール一式をデータベースから読み込む。
+ * テーブル未作成などで読めない場合は、従来どおりブラウザ保存の店舗ルールを基本ルールとして使う（画面を壊さない）。
+ * 戻り値の tableReady が false のときは、保存先テーブルがまだ用意されていない。
+ */
+export const loadDeliveryRules = async (storeId?: string): Promise<{ set: DeliveryRuleSet; tableReady: boolean }> => {
+  const fallback: DeliveryRuleSet = { base: getDeliveryRule(storeId), bySupplier: {} };
+  if (!storeId) return { set: fallback, tableReady: true };
+  try {
+    const { data, error } = await supabase.from(DELIVERY_RULES_TABLE).select('*').eq('store_id', storeId);
+    if (error) throw error;
+    const set: DeliveryRuleSet = { base: fallback.base, bySupplier: {} };
+    for (const row of data || []) {
+      if (!row.supplier_key) {
+        set.base = pickRule(row);
+      } else {
+        set.bySupplier[row.supplier_key] = { ...pickRule(row), supplier_label: row.supplier_label || row.supplier_key };
+      }
+    }
+    return { set, tableReady: true };
+  } catch (err) {
+    console.warn('納品ルールテーブルを読み込めませんでした（未作成の可能性）。ブラウザ保存の店舗ルールを使用します:', err);
+    return { set: fallback, tableReady: false };
+  }
+};
+
+/**
+ * 店舗の納品ルール一式をデータベースへ保存する（基本ルール＋卸ごとの個別ルール）。
+ * 画面で削除された卸の個別ルールは、データベースからも削除する。
+ */
+export const saveDeliveryRules = async (storeId: string, set: DeliveryRuleSet): Promise<void> => {
+  const toRow = (supplier_key: string, supplier_label: string | null, r: DeliveryRule) => ({
+    store_id: storeId,
+    supplier_key,
+    supplier_label,
+    cutoff_time: r.cutoff_time,
+    lead_days_before_cutoff: r.lead_days_before_cutoff,
+    lead_days_after_cutoff: r.lead_days_after_cutoff,
+    non_delivery_weekdays: r.non_delivery_weekdays,
+    holiday_no_delivery: r.holiday_no_delivery,
+    same_day_cutoff_time: r.same_day_cutoff_time || null,
+    updated_at: new Date().toISOString(),
+  });
+
+  const rows = [
+    toRow('', null, set.base),
+    ...Object.entries(set.bySupplier).map(([key, r]) => toRow(key, r.supplier_label, r)),
+  ];
+
+  const { error: upErr } = await supabase
+    .from(DELIVERY_RULES_TABLE)
+    .upsert(rows, { onConflict: 'store_id,supplier_key' });
+  if (upErr) throw upErr;
+
+  // 画面で外した卸の個別ルールを削除
+  const { data: existing, error: selErr } = await supabase
+    .from(DELIVERY_RULES_TABLE)
+    .select('supplier_key')
+    .eq('store_id', storeId);
+  if (selErr) throw selErr;
+  const keep = new Set(['', ...Object.keys(set.bySupplier)]);
+  const removeKeys = (existing || []).map((r: any) => r.supplier_key).filter((k: string) => !keep.has(k));
+  if (removeKeys.length > 0) {
+    const { error: delErr } = await supabase
+      .from(DELIVERY_RULES_TABLE)
+      .delete()
+      .eq('store_id', storeId)
+      .in('supplier_key', removeKeys);
+    if (delErr) throw delErr;
+  }
+
+  // 基本ルールはブラウザにも控えておく（テーブルが読めない時の予備）
+  saveDeliveryRule(storeId, set.base);
 };

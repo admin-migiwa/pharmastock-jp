@@ -122,7 +122,9 @@ import {
   DEFAULT_DELIVERY_RULE, 
   calculateExpectedDeliveryDate, 
   calculateDelayDays,
-  getDeliveryRule 
+  DeliveryRuleSet,
+  loadDeliveryRules,
+  resolveDeliveryRule
 } from './deliveryRule';
 
 /**
@@ -172,8 +174,9 @@ export const getDelayBadge = (order: Order, rule: DeliveryRule = DEFAULT_DELIVER
  * 発注と入庫履歴（purchase_history）の消し込みロジック
  * ※店舗ごとの配送ルール（締め時間・土日祝なし）に基づき予定日を算出し照合します。
  */
-export const reconcileOrders = async (storeId: string, marginDays = 7, customRule?: DeliveryRule) => {
-  const rule = customRule || getDeliveryRule(storeId);
+export const reconcileOrders = async (storeId: string, marginDays = 7, customRules?: DeliveryRuleSet) => {
+  // 卸ごとの納品ルール一式（未指定ならデータベースから読み込む）
+  const ruleSet = customRules || (await loadDeliveryRules(storeId)).set;
   const { data: allOrders, error: orderErr } = await supabase
     .from('orders')
     .select('*')
@@ -231,7 +234,9 @@ export const reconcileOrders = async (storeId: string, marginDays = 7, customRul
   const updates: Partial<Order>[] = [];
 
   for (const ord of allOrders as Order[]) {
-    // 店舗ルールに基づいた予定納品日を計算 (土日祝や発注締め時刻を考慮)
+    // 発注先の卸に設定された納品ルール（なければ店舗の基本ルール）
+    const rule = resolveDeliveryRule(ruleSet, ord.supplier);
+    // そのルールに基づいた予定納品日を計算 (土日祝や発注締め時刻を考慮)
     const expectedDate = calculateExpectedDeliveryDate(ord.order_date, ord.order_time, rule) || ord.delivery_date;
 
     // 期間フィルタ: 発注日 <= 入庫日 <= 予定納品日 + marginDays
