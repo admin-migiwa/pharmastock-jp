@@ -57,6 +57,13 @@ const orNull = (v: any): string | null => {
   return s === '' ? null : s;
 };
 
+// 出荷調整中か：⑫が通常出荷以外、または⑰が「A（出荷量通常／増加）」以外（減少・停止・薬価削除予定など）
+const judgeAdjusting = (status: string, volume: string | null): boolean => {
+  if (!status.includes('通常出荷')) return true;
+  if (volume && !/^A/.test(volume)) return true;
+  return false;
+};
+
 const ShipmentBadge: React.FC<{ lookup?: ShipmentLookup }> = ({ lookup }) => {
   if (!lookup || lookup.kind === 'none') {
     return <span className="text-[10px] text-slate-300 font-bold">情報なし</span>;
