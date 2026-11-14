@@ -32,7 +32,7 @@ import {
 import { Store, Order, OrderStatus, IgnoredOrderItem, ShipmentLookup } from '../types';
 import { supabase } from '../supabase';
 import { parseOrderCsv, reconcileOrders, getDelayBadge, DelayBadgeInfo } from '../orderMatch';
-import { lookupShipment, getShipmentBadge, normalizeName } from '../shipmentMatch';
+import { lookupShipment, getShipmentBadge, normalizeName, isDelisting, DELISTING_LABEL } from '../shipmentMatch';
 import { 
   DeliveryRule, 
   DEFAULT_DELIVERY_RULE, 
@@ -432,7 +432,9 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
         ord.delivered_qty,
         statusText,
         alreadyIgnored ? '一般除外品' : delayBadge.label,
-        shipmentBadge ? shipmentBadge.label : '通常出荷/データなし',
+        shipmentBadge
+          ? shipmentBadge.label + (shipmentLk && isDelisting(shipmentLk.rows) ? `（${DELISTING_LABEL}）` : '')
+          : (shipmentLk && isDelisting(shipmentLk.rows)) ? DELISTING_LABEL : '通常出荷/データなし',
         alreadyIgnored ? '除外設定済み' : '対象'
       ];
     });
@@ -496,7 +498,9 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
           <td>${ord.supplier || '-'}</td>
           <td style="text-align:center;font-weight:bold;">${ord.delivered_qty} / ${ord.order_qty}</td>
           <td>${alreadyIgnored ? '一般除外品' : statusText + ' (' + delayBadge.label + ')'}</td>
-          <td>${shipmentBadge ? shipmentBadge.label : '通常出荷'}</td>
+          <td>${shipmentBadge
+            ? shipmentBadge.label + (shipmentLk && isDelisting(shipmentLk.rows) ? `（${DELISTING_LABEL}）` : '')
+            : (shipmentLk && isDelisting(shipmentLk.rows)) ? DELISTING_LABEL : '通常出荷'}</td>
         </tr>
       `;
     }).join('');
@@ -1411,6 +1415,19 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
                             >
                               <AlertCircle className="w-3 h-3" />
                               <span>{shipmentBadge.label}</span>
+                              <Info className="w-3 h-3 ml-0.5 opacity-70" />
+                            </button>
+                          ) : null}
+                          {shipmentBadge && shipmentLk && isDelisting(shipmentLk.rows) && (
+                            <div className="text-[10px] text-slate-400 font-bold mt-0.5">＋{DELISTING_LABEL}</div>
+                          )}
+                          {shipmentBadge ? null : shipmentLk && isDelisting(shipmentLk.rows) ? (
+                            <button
+                              onClick={() => setSelectedOrderForDetail({ order: ord, shipment: shipmentLk })}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all transform hover:scale-105 bg-slate-800 text-slate-300 border-slate-500 hover:bg-slate-700"
+                              title="出荷調整ではなく、薬価削除（販売終了）予定の品目です"
+                            >
+                              <span>{DELISTING_LABEL}</span>
                               <Info className="w-3 h-3 ml-0.5 opacity-70" />
                             </button>
                           ) : (

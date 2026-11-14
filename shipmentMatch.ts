@@ -141,11 +141,24 @@ export async function lookupShipment(stocks: StockKey[]): Promise<ShipmentLookup
 }
 
 /** 一覧表示用ラベル（調整中でなければ null） */
+// ⑰出荷量が「D．薬価削除予定」か（販売終了に向けた品目のため、出荷調整とは区別して扱う）
+export const isDelistingVolume = (volume: string | null | undefined): boolean =>
+  /^[DＤ]/.test((volume || '').trim());
+
+// 候補のいずれかが薬価削除予定か
+export const isDelisting = (rows: ShipmentStatus[]): boolean =>
+  rows.some(r => isDelistingVolume(r.volume_status));
+
+export const DELISTING_LABEL = '薬価削除予定';
+
 export const getShipmentBadge = (rows: ShipmentStatus[]): { label: string; level: 'stop' | 'limited' | 'reduced' } | null => {
   // 複数候補の場合は最も深刻なものを返す
   let best: { label: string; level: 'stop' | 'limited' | 'reduced'; rank: number } | null = null;
   for (const r of rows) {
     if (!r.is_adjusting) continue;
+    // ⑫が通常出荷で⑰が薬価削除予定のみの品目は出荷調整に数えない（取込済みの古いデータもここで除外）
+    // ⑫が供給停止・限定出荷なら、薬価削除予定であっても出荷調整を優先する
+    if (isDelistingVolume(r.volume_status) && (r.status || '').includes('通常出荷')) continue;
     const st = (r.status || '').replace(/^[①-⑩]/, '');
     const vol = (r.volume_status || '').replace(/^[A-Za-zＡ-Ｚプラス]+[．.]/, '');
     let cand: { label: string; level: 'stop' | 'limited' | 'reduced'; rank: number };

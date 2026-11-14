@@ -7,7 +7,7 @@ import {
 import readXlsxFile from 'read-excel-file/browser';
 import { supabase } from '../supabase';
 import { Store, RealtimeStock, ShipmentLookup } from '../types';
-import { normalizeName, isValidYjCode, lookupShipment, getShipmentBadge } from '../shipmentMatch';
+import { normalizeName, isValidYjCode, lookupShipment, getShipmentBadge, isDelisting, isDelistingVolume, DELISTING_LABEL } from '../shipmentMatch';
 
 interface ShipmentStatusImportProps {
   storeId: string;
@@ -57,9 +57,13 @@ const orNull = (v: any): string | null => {
   return s === '' ? null : s;
 };
 
-// 出荷調整中か：⑫が通常出荷以外、または⑰が「A（出荷量通常／増加）」以外（減少・停止・薬価削除予定など）
+// 出荷調整中か：⑫が通常出荷以外、または⑰が「A（出荷量通常／増加）」以外（減少・停止など）
+// 優先順位：出荷調整 ＞ 薬価削除予定
+//   ⑫が通常出荷以外なら、⑰が「D．薬価削除予定」でも出荷調整として数える
+//   ⑫が通常出荷で⑰が「D．薬価削除予定」の品目は出荷調整に数えず、薬価削除予定として別表示する
 const judgeAdjusting = (status: string, volume: string | null): boolean => {
   if (!status.includes('通常出荷')) return true;
+  if (isDelistingVolume(volume)) return false;
   if (volume && !/^A/.test(volume)) return true;
   return false;
 };
@@ -78,7 +82,9 @@ const ShipmentBadge: React.FC<{ lookup?: ShipmentLookup }> = ({ lookup }) => {
   if (!badge) {
     return (
       <div className="flex flex-col items-center gap-0.5">
-        <span className="text-[10px] text-slate-400 font-bold">通常</span>
+        {isDelisting(lookup.rows)
+          ? <span className="text-[10px] font-black px-2 py-0.5 rounded-md border whitespace-nowrap bg-slate-100 text-slate-600 border-slate-300">{DELISTING_LABEL}</span>
+          : <span className="text-[10px] text-slate-400 font-bold">通常</span>}
         {mark}
       </div>
     );
@@ -90,6 +96,7 @@ const ShipmentBadge: React.FC<{ lookup?: ShipmentLookup }> = ({ lookup }) => {
   return (
     <div className="flex flex-col items-center gap-0.5">
       <span className={`text-[10px] font-black px-2 py-0.5 rounded-md border whitespace-nowrap ${cls}`}>{badge.label}</span>
+      {isDelisting(lookup.rows) && <span className="text-[8px] text-slate-500 font-bold whitespace-nowrap">＋{DELISTING_LABEL}</span>}
       {mark}
     </div>
   );
@@ -392,13 +399,16 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
     }
   };
 
+  // 優先順位は 出荷調整 ＞ 薬価削除予定。
+  // 「薬価削除予定」欄は出荷調整に該当しないもの（⑫通常出荷＋⑰D）のみを数える
   const summary = parsed ? {
     total: parsed.length,
-    normal: parsed.filter(r => !r.is_adjusting).length,
+    normal: parsed.filter(r => !r.is_adjusting && !isDelistingVolume(r.volume_status)).length,
     adjusting: parsed.filter(r => r.is_adjusting).length,
+    delisting: parsed.filter(r => !r.is_adjusting && isDelistingVolume(r.volume_status)).length,
     stop: parsed.filter(r => r.status.includes('供給停止')).length,
     limited: parsed.filter(r => r.status.includes('限定出荷')).length,
-    reduced: parsed.filter(r => r.volume_status && !/^A/.test(r.volume_status)).length,
+    reduced: parsed.filter(r => r.volume_status && !/^A/.test(r.volume_status) && !isDelistingVolume(r.volume_status)).length,
   } : null;
 
   const pct = (n: number, t: number) => (t === 0 ? '-' : `${Math.round((n / t) * 100)}%`);
@@ -470,10 +480,11 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
           {summary && (
             <div className="bg-white border-2 border-slate-100 rounded-[24px] p-5">
               <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">解析結果（取込前の確認）</div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-center">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
                 <div className="bg-slate-50 rounded-xl p-3"><div className="text-xl font-black text-slate-800">{summary.total.toLocaleString()}</div><div className="text-[10px] font-bold text-slate-400">全品目</div></div>
                 <div className="bg-slate-50 rounded-xl p-3"><div className="text-xl font-black text-slate-800">{summary.normal.toLocaleString()}</div><div className="text-[10px] font-bold text-slate-400">通常</div></div>
                 <div className="bg-amber-50 rounded-xl p-3"><div className="text-xl font-black text-amber-700">{summary.adjusting.toLocaleString()}</div><div className="text-[10px] font-bold text-amber-600">出荷調整中</div></div>
+                <div className="bg-slate-100 rounded-xl p-3"><div className="text-xl font-black text-slate-600">{summary.delisting.toLocaleString()}</div><div className="text-[10px] font-bold text-slate-500">{DELISTING_LABEL}（出荷調整以外）</div></div>
                 <div className="bg-red-50 rounded-xl p-3"><div className="text-xl font-black text-red-600">{summary.stop.toLocaleString()}</div><div className="text-[10px] font-bold text-red-500">供給停止</div></div>
                 <div className="bg-amber-50 rounded-xl p-3"><div className="text-xl font-black text-amber-700">{summary.limited.toLocaleString()}</div><div className="text-[10px] font-bold text-amber-600">限定出荷</div></div>
                 <div className="bg-orange-50 rounded-xl p-3"><div className="text-xl font-black text-orange-600">{summary.reduced.toLocaleString()}</div><div className="text-[10px] font-bold text-orange-500">出荷量 減少・停止等</div></div>

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Search, Globe, Clock, Building2, RefreshCcw, LayoutGrid, CircleCheckBig, AlertTriangle, Truck } from 'lucide-react';
 import { supabase } from '../supabase';
 import { Store, RealtimeStock, ShipmentLookup } from '../types';
-import { lookupShipment, getShipmentBadge } from '../shipmentMatch';
+import { lookupShipment, getShipmentBadge, isDelisting, DELISTING_LABEL } from '../shipmentMatch';
 
 interface RealtimeSearchProps {
   stores: Store[];
@@ -81,7 +81,9 @@ const ShipmentBadge: React.FC<{ lookup?: ShipmentLookup }> = ({ lookup }) => {
   if (!badge) {
     return (
       <div className="flex flex-col items-center gap-0.5">
-        <span className="text-[10px] text-slate-400 font-bold">通常</span>
+        {isDelisting(lookup.rows)
+          ? <span className="text-[10px] font-black px-2 py-0.5 rounded-md border whitespace-nowrap bg-slate-100 text-slate-600 border-slate-300">{DELISTING_LABEL}</span>
+          : <span className="text-[10px] text-slate-400 font-bold">通常</span>}
         {mark}
       </div>
     );
@@ -93,6 +95,7 @@ const ShipmentBadge: React.FC<{ lookup?: ShipmentLookup }> = ({ lookup }) => {
   return (
     <div className="flex flex-col items-center gap-0.5">
       <span className={`text-[10px] font-black px-2 py-0.5 rounded-md border whitespace-nowrap ${cls}`}>{badge.label}</span>
+      {isDelisting(lookup.rows) && <span className="text-[8px] text-slate-500 font-bold whitespace-nowrap">＋{DELISTING_LABEL}</span>}
       {mark}
     </div>
   );
@@ -118,7 +121,7 @@ const ShipmentDetail: React.FC<{ lookup?: ShipmentLookup }> = ({ lookup }) => {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             {lookup.rows.map(r => {
               const b = getShipmentBadge([r]);
-              const rowCls = b ? (b.level === 'stop' ? 'border-red-200' : b.level === 'limited' ? 'border-amber-200' : 'border-orange-200') : 'border-slate-200';
+              const rowCls = b ? (b.level === 'stop' ? 'border-red-200' : b.level === 'limited' ? 'border-amber-200' : 'border-orange-200') : isDelisting([r]) ? 'border-slate-400' : 'border-slate-200';
               const items: [string, string | null | undefined][] = [
                 ['出荷対応', r.status],
                 ['出荷量', r.volume_status],
