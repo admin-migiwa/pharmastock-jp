@@ -2,8 +2,12 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   FileSpreadsheet, Upload, CheckCircle, AlertCircle, Info, Building2,
   FileWarning, RefreshCw, BarChart3, AlertTriangle, Truck, ChevronLeft, ChevronRight,
-  ChevronDown, ChevronUp, Package, Search
+  ChevronDown, ChevronUp, Package, Search, ExternalLink
 } from 'lucide-react';
+
+// 厚労省「医療用医薬品供給状況報告」ページ（Excelの最新版はここから入手）
+const MHLW_SUPPLY_STATUS_URL =
+  'https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/kenkou_iryou/iryou/kouhatu-iyaku/04_00003.html';
 import readXlsxFile from 'read-excel-file/browser';
 import { supabase } from '../supabase';
 import { Store, RealtimeStock, ShipmentLookup } from '../types';
@@ -464,6 +468,18 @@ const ShipmentStatusImport: React.FC<ShipmentStatusImportProps> = ({ storeId, st
             </h3>
             <p className="text-xs text-slate-400 font-bold mt-2">厚労省「医療用医薬品の供給状況」 .xlsx</p>
           </div>
+
+          <a
+            href={MHLW_SUPPLY_STATUS_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center justify-between gap-3 px-5 py-3 rounded-2xl border-2 border-blue-100 bg-blue-50/50 hover:bg-blue-50 hover:border-blue-300 transition-colors"
+          >
+            <span className="text-sm font-bold text-blue-700">
+              最新のExcelを入手：厚生労働省「医療用医薬品供給状況報告」
+            </span>
+            <ExternalLink size={16} className="text-blue-600 shrink-0" />
+          </a>
 
           {message && (
             <div className={`p-4 rounded-2xl flex items-center gap-3 border-2 ${
