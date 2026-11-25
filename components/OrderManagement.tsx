@@ -244,6 +244,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       await fetchOrders();
     } catch (err: any) {
       setUploadMessage({ type: 'error', text: `再照合に失敗しました: ${err.message}` });
+      await fetchOrders(); // 一部だけ更新できた場合も画面に反映する
     } finally {
       setReconciling(false);
     }
@@ -399,8 +400,9 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       // 3. 再照合を実行
       try {
         await reconcileOrders(currentStoreId, marginDays, ruleSet);
-      } catch (rErr) {
+      } catch (rErr: any) {
         console.warn('Reconcile error after restore:', rErr);
+        setUploadMessage({ type: 'error', text: `「${item.name}」は復元しましたが、再照合に失敗しました: ${rErr.message}` });
       }
 
       await fetchOrders();
@@ -442,8 +444,9 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       // 3. 再照合を実行
       try {
         await reconcileOrders(currentStoreId, marginDays, ruleSet);
-      } catch (rErr) {
+      } catch (rErr: any) {
         console.warn('Reconcile error after order restore:', rErr);
+        setUploadMessage({ type: 'error', text: `「${order.name}」は復元しましたが、再照合に失敗しました: ${rErr.message}` });
       }
 
       await fetchOrders();
@@ -835,8 +838,9 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       try {
         const result = await reconcileOrders(currentStoreId, marginDays, ruleSet);
         setUploadMessage({ type: 'success', text: `${msg} 照合完了（${result.updatedCount} 件を更新）` });
-      } catch (rErr) {
+      } catch (rErr: any) {
         console.error('Auto reconcile error:', rErr);
+        setUploadMessage({ type: 'error', text: `${msg} ただし照合に失敗しました: ${rErr.message}` });
       }
       await fetchOrders();
     }
@@ -883,6 +887,7 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     } catch (err: any) {
       console.error('Reconcile error:', err);
       setUploadMessage({ type: 'error', text: `照合処理でエラーが発生しました: ${err.message}` });
+      await fetchOrders(); // 一部だけ更新できた場合も画面に反映する
     } finally {
       setReconciling(false);
     }

@@ -30,6 +30,7 @@ export const normalizeOrderTime = (time: string | null | undefined): string => {
 };
 
 const PAGE_SIZE = 1000;
+const MAX_CONSECUTIVE_FAILURES = 5;
 
 // Supabaseは1回の取得が既定で最大1000件のため、空になるまで続きを取得する。
 // 呼び出し側は、ページ間で順序が変わらないよう一意な列(id)まで並び順に含めること。
@@ -413,12 +414,33 @@ export const reconcileOrders = async (storeId: string, marginDays = 7, customRul
     }
   }
 
-  // バッチ更新
-  if (updates.length > 0) {
-    for (const item of updates) {
-      await supabase.from('orders').update(item).eq('id', item.id);
+  // 1件ずつ更新。失敗しても残りは続け、最後にまとめてエラーにする（再照合すれば残りが更新される）
+  let updatedCount = 0;
+  let failedCount = 0;
+  let consecutiveFailures = 0;
+  let firstError = '';
+  for (const item of updates) {
+    // 権限不足や削除済みで対象が0件でもエラーにならないため、更新できた行を受け取って確認する
+    const { data, error } = await supabase.from('orders').update(item).eq('id', item.id!).select('id');
+    if (!error && data && data.length > 0) {
+      updatedCount++;
+      consecutiveFailures = 0;
+      continue;
     }
+    failedCount++;
+    consecutiveFailures++;
+    if (!firstError) firstError = error?.message || '更新対象の発注が見つからないか、更新権限がありません';
+    console.error('Order update failed:', item.id, error);
+    // 通信断などで全件失敗し続ける場合は打ち切る
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) break;
   }
 
-  return { updatedCount: updates.length };
+  if (failedCount > 0) {
+    const skipped = updates.length - updatedCount - failedCount;
+    throw new Error(
+      `発注の更新に失敗しました（成功 ${updatedCount} 件 / 失敗 ${failedCount} 件${skipped > 0 ? ` / 未処理 ${skipped} 件` : ''}）: ${firstError}`
+    );
+  }
+
+  return { updatedCount };
 };
