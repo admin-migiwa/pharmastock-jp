@@ -34,6 +34,7 @@ import UnstockedCompare from './components/UnstockedCompare';
 
 // Supabase client
 import { supabase } from './supabase';
+import { fetchAllPages } from './orderMatch';
 
 const App: React.FC = () => {
   const [session, setSession] = useState<any>(null); // Authセッション用
@@ -86,9 +87,13 @@ const App: React.FC = () => {
         if (storesErr) throw storesErr;
         if (storesData) setStores(storesData as Store[]);
 
-        const { data: invData, error: invErr } = await supabase.from('inventory_items').select('*');
-        if (invErr) throw invErr;
-        if (invData) setInventory(invData.map(mapFromDb));
+        // 1回の取得は最大1000件のため、全件になるまで繰り返し取得する
+        const invData = await fetchAllPages<any>((from, to) => supabase
+          .from('inventory_items')
+          .select('*')
+          .order('id')
+          .range(from, to));
+        setInventory(invData.map(mapFromDb));
       } catch (err) {
         console.error('Supabase fetch error', err);
       }
@@ -131,6 +136,8 @@ const App: React.FC = () => {
 
     is_dead_stock: row.is_dead_stock ?? false,
     dead_stock_flag_date: row.dead_stock_flag_date ?? null,
+    // 未設定(NULL)は「在庫数全部」を意味するため、0に変換せずundefinedのまま保持する
+    dead_stock_qty: row.dead_stock_qty == null ? undefined : Number(row.dead_stock_qty),
     is_locked: row.is_locked ?? false,
     updated_at: row.updated_at,
     adopting_store_ids: row.adopting_store_ids || [],

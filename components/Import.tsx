@@ -2,6 +2,7 @@
 import React, { useState, useRef } from 'react';
 import { InventoryItem } from '../types';
 import { supabase } from '../supabase';
+import { fetchAllPages } from '../orderMatch';
 import { Upload, FileText, CheckCircle, AlertTriangle, RefreshCw, Terminal, XCircle, Eye, Pin, PinOff, ChevronRight, PackageCheck, Ghost, ShieldAlert, Store as StoreIcon } from 'lucide-react';
 
 interface Props {
@@ -278,19 +279,24 @@ const Import: React.FC<Props> = ({ inventory, setInventory, currentStoreId, stor
                 headers: { 'Content-Type': 'application/json' }
               });
 
-              if (funcError) throw funcError;
+              if (funcError) {
+                // サーバー側が返した具体的なエラー内容を表示する
+                const detail = await (funcError as any).context?.json?.().catch(() => null);
+                throw new Error(detail?.error || funcError.message);
+              }
 
               // 2. サーバー側での保存成功を確認
               if (result && result.success) {
                 addLog(`サーバー保存完了: ${result.count} 件。最新データを取得しています...`);
 
                 // 3. 【重要】最新の在庫情報をDBから直接読み直す（これでF5不要になる）
-                const { data: updatedInventory, error: fetchError } = await supabase
+                //    1回の取得は最大1000件のため、全件になるまで繰り返し取得する
+                const updatedInventory = await fetchAllPages<any>((from, to) => supabase
                   .from('inventory_items')
                   .select('*')
-                  .eq('store_id', currentStoreId);
-
-                if (fetchError) throw fetchError;
+                  .eq('store_id', currentStoreId)
+                  .order('id')
+                  .range(from, to));
 
                 if (updatedInventory) {
                   // 4. 画面のステートを更新

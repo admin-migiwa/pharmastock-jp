@@ -556,8 +556,16 @@ async function processInventoryMode(csvText: string, store_id: string, SUPABASE_
     };
 
     const fetchUrl = `${SUPABASE_URL}/rest/v1/inventory_items?select=id,yakka_code,lot_number,expiry_date,stock_total,is_dead_stock,dead_stock_flag_date,is_locked,dead_stock_qty,requested_amounts,adopting_store_ids&store_id=eq.${encodeURIComponent(store_id)}`;
-    const existingRes = await fetch(fetchUrl, { headers: { 'apikey': SERVICE_KEY, 'Authorization': `Bearer ${SERVICE_KEY}` } });
-    const existing = existingRes.ok ? await existingRes.json() : [];
+    // 1回の取得は最大1000件のため、無くなるまで繰り返し取得する
+    const existing: any[] = [];
+    while (true) {
+      const existingRes = await fetch(`${fetchUrl}&order=id&limit=1000&offset=${existing.length}`, { headers: { 'apikey': SERVICE_KEY, 'Authorization': `Bearer ${SERVICE_KEY}` } });
+      // 取得できないまま進めると、設定の消失や重複登録になるため中止する
+      if (!existingRes.ok) throw new Error(`既存の棚卸データの取得に失敗: ${await existingRes.text()}`);
+      const page = await existingRes.json();
+      if (page.length === 0) break;
+      existing.push(...page);
+    }
     const flagHistory = new Map<string, any>();
     for (const r of existing) {
       const key = generateKey(r.yakka_code, r.lot_number, r.expiry_date);
@@ -631,38 +639,55 @@ async function processInventoryMode(csvText: string, store_id: string, SUPABASE_
       }
     }
 
-    const newRows = Array.from(rowsMap.values());
-    const toDeleteIds: string[] = [];
-    for (const r of existing) {
-      const key = generateKey(r.yakka_code, r.lot_number, r.expiry_date);
-      if (!newKeys.has(key)) toDeleteIds.push(r.id);
-    }
+    // 1件も読み取れないファイルで、既存の在庫を全て削除してしまわないように中止する
+    if (rowsMap.size === 0) throw new Error('有効な棚卸データが見つかりませんでした。ファイル形式を確認してください。');
 
-    if (toDeleteIds.length > 0) {
-      const BATCH_SIZE = 100;
-      for (let i = 0; i < toDeleteIds.length; i += BATCH_SIZE) {
-        const batch = toDeleteIds.slice(i, i + BATCH_SIZE);
-        await fetch(`${SUPABASE_URL}/rest/v1/inventory_items?id=in.(${batch.join(',')})`, { method: 'DELETE', headers: { 'apikey': SERVICE_KEY, 'Authorization': `Bearer ${SERVICE_KEY}` } });
+    // 既存の行はid指定で更新、それ以外は新規登録する。
+    // （1回の送信では全行の列を揃える必要があるため、更新と新規を分けて送る）
+    const updateRows: any[] = [];
+    const insertRows: any[] = [];
+    const keptIds = new Set<string>();
+    for (const [key, row] of rowsMap.entries()) {
+      const history = flagHistory.get(key);
+      if (history) {
+        keptIds.add(history.id);
+        updateRows.push({ id: history.id, ...row });
+      } else {
+        insertRows.push(row);
       }
     }
+    const toDeleteIds: string[] = existing.filter((r: any) => !keptIds.has(r.id)).map((r: any) => r.id);
 
-    if (newRows.length > 0) {
-      const UPSERT_BATCH_SIZE = 100;
-      for (let i = 0; i < newRows.length; i += UPSERT_BATCH_SIZE) {
-        const batchRows = newRows.slice(i, i + UPSERT_BATCH_SIZE);
-        await fetch(`${SUPABASE_URL}/rest/v1/inventory_items`, {
+    const BATCH_SIZE = 100;
+    const saveRows = async (rows: any[], query: string, prefer: string, label: string) => {
+      for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/inventory_items${query}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'apikey': SERVICE_KEY,
             'Authorization': `Bearer ${SERVICE_KEY}`,
-             'Prefer': 'resolution=merge-duplicates, ON_CONFLICT=inventory_items_unique_key'
+            'Prefer': prefer
           },
-          body: JSON.stringify(batchRows)
+          body: JSON.stringify(rows.slice(i, i + BATCH_SIZE))
         });
+        if (!res.ok) throw new Error(`棚卸データの${label}に失敗(${i + 1}件目〜): ${await res.text()}`);
       }
+    };
+
+    // 登録が失敗したときに在庫が消えないよう、保存が全て成功してから古い行を削除する
+    await saveRows(updateRows, '?on_conflict=id', 'resolution=merge-duplicates,return=minimal', '更新');
+    await saveRows(insertRows, '', 'return=minimal', '新規登録');
+
+    for (let i = 0; i < toDeleteIds.length; i += BATCH_SIZE) {
+      const batch = toDeleteIds.slice(i, i + BATCH_SIZE);
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/inventory_items?id=in.(${batch.join(',')})`, {
+        method: 'DELETE',
+        headers: { 'apikey': SERVICE_KEY, 'Authorization': `Bearer ${SERVICE_KEY}` }
+      });
+      if (!res.ok) throw new Error(`古い棚卸データの削除に失敗: ${await res.text()}`);
     }
-    return { success: true, count: newRows.length };
+    return { success: true, count: rowsMap.size };
 }
 
 // --- サーバー起動 ---

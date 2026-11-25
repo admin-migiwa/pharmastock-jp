@@ -27,8 +27,11 @@
     const [sorts, setSorts] = useState<SortState[]>([{ key: 'expiry_date', order: 'asc' }]);
     
     const handleBulkUpdate = (yakkaCode: string) => {
-      const targets = inventory.filter(item => (item.yakka_code || item.yj_code) === yakkaCode);
-      const targetIds = targets.map(item => item.id);
+      // 他店の在庫まで変更しないよう、自店の品目だけを対象にする
+      const targets = inventory.filter(item =>
+        String(item.store_id) === String(currentStoreId) &&
+        (item.yakka_code || item.yj_code) === yakkaCode
+      );
       // 一括設定時も、個別トグルと同じく「在庫数全部」を初期値にする
       targets.forEach(item => {
         onUpdateItem(item.id, {
