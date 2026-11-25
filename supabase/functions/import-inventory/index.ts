@@ -11,35 +11,75 @@ const toNum = (val: string) => {
   const cleaned = val.replace(/^"|"$/g, '').replace(/,/g, '');
   return Number(cleaned) || 0;
 };
-// 全角の数字・英字を半角に変換（CSVデータに全角混じりのため）
-const toHalfWidth = (str: string): string => {
-  if (!str) return str;
-  return str.replace(/[０-９Ａ-Ｚａ-ｚ]/g, (ch) =>
-    String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
-  );
+// 単位の表記ゆれを統一（ｇ/Ｇ/g、Ｃ/C/カプセル、ｷｯ/ｷｯﾄ/キット、mL/ＭＬ など）
+// NFKC = 全角英数→半角、半角カナ→全角カナ に揃えるUnicode標準の変換
+const UNIT_ALIAS: Record<string, string> = {
+  'カプセル': 'C', 'CAP': 'C', 'キッ': 'キット', 'シー': 'シート', 'グラム': 'G', 'CC': 'ML',
 };
-// 末尾の単位と数値をダイレクトにマッチさせる
-const parseContentAmount = (name: string): number => {
-  if (!name) return 1;
-  const normalized = toHalfWidth(name);
-  // 単位（g, 錠, 包, 本, 個, 枚, ｷｯﾄ, ml, カプセル 等）の直前にある数値を、末尾から探して抽出
-  // ※文字クラスではなく交代(|)で複数文字の単位（ml、ｷｯﾄ、カプセル等）も正しく拾えるようにしている
-  const match = normalized.match(/([0-9.]+)\s*(?:g|錠|包|本|個|枚|ｷｯﾄ|キット|ml|カプセル|ｶﾌﾟｾﾙ)[\)）]$/i);
-  return match ? parseFloat(match[1]) : 1;
+const normUnit = (u: string): string => {
+  const k = (u || '').normalize('NFKC').replace(/\s/g, '').toUpperCase();
+  return UNIT_ALIAS[k] || k;
 };
-// 規格の「100錠入り」「42包入り」から数値を抽出
-const parsePackSize = (spec: string): number => {
-  if (!spec) return 1;
-  const normalized = toHalfWidth(spec);
-  const match = normalized.match(/(\d+)/);
-  return match ? parseInt(match[1], 10) : 1;
+
+// 薬品名末尾の「(ﾁｭｰﾌﾞ25ｇ)」「(PTP1錠)」「(枚7枚)」から、1個あたりの内容量と単位を取り出す
+const parseContent = (name: string): { amount: number, unit: string } => {
+  const n = (name || '').normalize('NFKC').trim();
+  const m = n.match(/([0-9][0-9,]*(?:\.[0-9]+)?)\s*([^0-9()\s]+)\)$/);
+  if (!m) return { amount: 1, unit: '' };
+  return { amount: Number(m[1].replace(/,/g, '')) || 1, unit: normUnit(m[2]) };
+};
+
+// 規格「100錠入り」「10本入り」「1,000錠入り」から、1箱あたりの入数と単位を取り出す
+const parsePack = (spec: string): { size: number, unit: string } => {
+  const m = (spec || '').normalize('NFKC').match(/([0-9][0-9,]*(?:\.[0-9]+)?)\s*([^0-9\s]*)/);
+  if (!m) return { size: 1, unit: '' };
+  return { size: Number(m[1].replace(/,/g, '')) || 1, unit: normUnit(m[2].replace(/入り?$/, '')) };
+};
+
+const roundQty = (n: number) => Math.round(n * 10000) / 10000;
+
+/**
+ * 入庫数を、在庫一覧と同じ数え方（錠・ｇ・mL・枚など）に換算する
+ *  ・箱：      入庫数 × 入数 × 1個あたりの内容量（例 2箱 × 10本 × 25ｇ = 500ｇ）
+ *  ・本/袋/包：入庫数 × 1個あたりの内容量        （例 2本 × 25ｇ = 50ｇ）
+ *  ・錠/ｇ/mL：すでにバラ数なので換算しない       （例 (ﾁｭｰﾌﾞ25ｇ) の 125ｇ = 125ｇ）
+ */
+const toStockQty = (qty: number, unit: string, name: string, spec: string): number => {
+  const content = parseContent(name);
+  let count = qty;
+  let countUnit = normUnit(unit);
+  // 規格（○○入り）があるのは箱単位の入庫。入数を掛けて「10本」「100錠」などに直す
+  if (countUnit === '箱' && spec) {
+    const pack = parsePack(spec);
+    count = qty * pack.size;
+    countUnit = pack.unit;
+  }
+  // 数えている単位が内容量の単位と同じなら、すでにバラ数になっている
+  if (countUnit && countUnit === content.unit) return roundQty(count);
+  return roundQty(count * content.amount);
 };
 
 // 薬価コードなどのクレンジング（スペース除去、文字列化）
 const cleanCode = (val: any) => (val || '').toString().replace(/^"|"$/g, '').trim();
 
-// 名称の正規化（空白除去）- 南森町店などの名称マッチング精度向上用
-const normalize = (val: string) => (val || '').replace(/[\s　]/g, '');
+// 名称の正規化（全角半角・空白・ハイフン類の違いを吸収）
+const normalize = (val: string) => (val || '')
+  .normalize('NFKC')
+  .toUpperCase()
+  .replace(/\s/g, '')
+  .replace(/[‐‑–—―−]/g, '-');
+
+// JAN(13桁)とGS1(14桁)は先頭と末尾（チェック数字）が異なるため、共通の12桁で照合する
+const janKey = (code: string): string => {
+  const c = (code || '').trim();
+  if (/^\d{14}$/.test(c)) return c.slice(1, 13);
+  if (/^\d{13}$/.test(c)) return c.slice(0, 12);
+  return '';
+};
+
+// 包装の照合キー（南森町形式：同じ商品名でも「ＰＴＰ/100」「バラ/1,000」等が別行になるため）
+const makePackKey = (type: string, size: string): string =>
+  `${normalize(type)}|${toNum(size) || ''}`;
 
 const splitCsvLine = (line: string): string[] => {
   const result: string[] = [];
@@ -121,30 +161,43 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
     qty: getIdx(headers, ['入庫数', '数量'], 5),
     lot: getIdx(headers, ['ﾛｯﾄNo', '製造番号'], 11),
     expiry: getIdx(headers, ['有効年', '使用期限'], 12),
-    yCode: getIdx(headers, ['厚生省ｺｰﾄﾞ', '厚生省コード', 'YCODE', 'GS1/JAN', 'JANコード'], 15)
+    yCode: getIdx(headers, ['JANコード', 'GS1/JAN', 'YCODE', '厚生省ｺｰﾄﾞ', '厚生省コード'], 15)
   };
+  // JANが空欄の行は厚生省コード等で代用する（空欄のままだと別の薬品同士が合算されてしまう）
+  const altCodeIdx = ['JANコード', 'GS1/JAN', '厚生省ｺｰﾄﾞ', '厚生省コード', 'YCODE']
+    .map(k => headers.indexOf(k)).filter(i => i !== -1);
+  const specIdx = headers.indexOf('規格');
+  const unitIdx = headers.indexOf('単位');
+  const packIdx = headers.indexOf('包装単位総量'); // 南森町形式（右隣の無題列が総量）
 
   const rowsMap = new Map<string, any>();
-  const targetYakkaCodes = new Set<string>();
-    for (let i = headerIdx + 1; i < allLines.length; i++) {
+  for (let i = headerIdx + 1; i < allLines.length; i++) {
     const cols = splitCsvLine(allLines[i]);
     if (cols.length <= Math.max(...Object.values(idx))) continue;
 
     const boxQty = toNum(cols[idx.qty]); // CSVの入庫数（箱数や本数)
     const rawName = cols[idx.name]?.replace(/^"|"$/g, '').trim();
-    const rawSpec = headers.includes('規格') ? (cols[headers.indexOf('規格')] || '').replace(/^"|"$/g, '').trim() : '';
     if (!rawName || boxQty === 0) continue;
 
-    // --- ここでバラ換算を実行 ---
-    const contentAmount = parseContentAmount(rawName); // （）内の5gなど
-    const packSize = parsePackSize(rawSpec);           // 100錠入りなど
-    const totalUnitQty = boxQty * packSize * contentAmount; // 総バラ数
+    // --- ここで在庫と同じ数え方に換算 ---
+    // 南森町形式（規格・単位の列なし）の数量は、すでにバラ数なので換算しない
+    const totalUnitQty = unitIdx === -1 && specIdx === -1
+      ? boxQty
+      : toStockQty(
+          boxQty,
+          unitIdx !== -1 ? cleanCode(cols[unitIdx]) : '箱',
+          rawName,
+          specIdx !== -1 ? cleanCode(cols[specIdx]) : ''
+        );
 
     const purchaseDate = toDate(cols[idx.date]) || now.split('T')[0];
-    const yakkaCode = cleanCode(cols[idx.yCode]);
+    let yakkaCode = cleanCode(cols[idx.yCode]);
+    for (const i of altCodeIdx) {
+      if (yakkaCode) break;
+      yakkaCode = cleanCode(cols[i]);
+    }
     const lotNumber = cleanCode(cols[idx.lot]) || 'LOT不明';
 
-    if (yakkaCode) targetYakkaCodes.add(yakkaCode);
     
     // 数量(qty)をキーから外し、同一納品として集約する
     const compositeKey = `${purchaseDate}_${yakkaCode}_${lotNumber}`;
@@ -152,7 +205,8 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
     if (rowsMap.has(compositeKey)) {
       // すでに同じキーがあれば、数量を合算する
       const existing = rowsMap.get(compositeKey);
-      existing.quantity += totalUnitQty;
+      existing.quantity = roundQty(existing.quantity + totalUnitQty);
+      if (!existing.expiry_date) existing.expiry_date = toDate(cols[idx.expiry]);
       existing.updated_at = now;
     } else {
       rowsMap.set(compositeKey, {
@@ -163,6 +217,7 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
         lot_number: lotNumber,
         expiry_date: toDate(cols[idx.expiry]),
         quantity: totalUnitQty,
+        pack_key: packIdx !== -1 ? makePackKey(cols[packIdx], cols[packIdx + 1]) : null,
         updated_at: now
       });
     }
@@ -173,9 +228,10 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
 
   // 1. 入庫履歴の保存（バッチ処理 500件ずつ）
   const BATCH_SIZE = 500;
+  let usePackKey = true;
   for (let i = 0; i < historyRows.length; i += BATCH_SIZE) {
     const batch = historyRows.slice(i, i + BATCH_SIZE);
-    const historyRes = await fetch(`${SUPABASE_URL}/rest/v1/purchase_history?on_conflict=store_id,purchase_date,yakka_code,lot_number`, {
+    const postBatch = () => fetch(`${SUPABASE_URL}/rest/v1/purchase_history?on_conflict=store_id,purchase_date,yakka_code,lot_number`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -183,90 +239,143 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
         'Authorization': `Bearer ${SERVICE_KEY}`,
         'Prefer': 'resolution=merge-duplicates',
       },
-      body: JSON.stringify(batch)
+      body: JSON.stringify(usePackKey ? batch : batch.map(({ pack_key: _omit, ...rest }: any) => rest))
     });
+    let historyRes = await postBatch();
+    // pack_key 列の追加SQL（purchase_history_pack_key.sql）が未実行でも取り込めるようにする
+    if (!historyRes.ok && usePackKey) {
+      const errText = await historyRes.text();
+      if (!errText.includes('pack_key')) throw new Error(`入庫履歴の保存失敗(${i}件目〜): ${errText}`);
+      usePackKey = false;
+      historyRes = await postBatch();
+    }
     // 失敗を握りつぶさない（これが無いと「更新完了」の誤表示につながる）
     if (!historyRes.ok) throw new Error(`入庫履歴の保存失敗(${i}件目〜): ${await historyRes.text()}`);
   }
 
-// 2. 影響を受ける在庫のみ期限計算を回す（負荷対策：分割取得に修正）
-const codesArray = Array.from(targetYakkaCodes).filter(c => c !== '');
-if (codesArray.length > 0) {
-  const currentRT: any[] = [];
-  const QUERY_BATCH_SIZE = 100; // 安全な文字数に収まるよう分割
-
-  for (let i = 0; i < codesArray.length; i += QUERY_BATCH_SIZE) {
-    const chunk = codesArray.slice(i, i + QUERY_BATCH_SIZE);
-    const queryCodes = chunk.map(c => `"${c}"`).join(',');
-    const rtRes = await fetch(`${SUPABASE_URL}/rest/v1/realtime_stocks?store_id=eq.${store_id}&yakka_code=in.("${queryCodes}")`, {
-      headers: { 'apikey': SERVICE_KEY, 'Authorization': `Bearer ${SERVICE_KEY}` }
-    });
-    
-    if (rtRes.ok) {
-      const data = await rtRes.json();
-      currentRT.push(...data);
-    }
-  }
-
-    if (currentRT.length > 0) {
-      const updateRows = currentRT.map((stock: any) => {
-        // 今インポートしたデータの中から該当するものを探す（簡易計算）
-        const matches = historyRows.filter(h => h.yakka_code === stock.yakka_code);
-        if (matches.length > 0) {
-          const latestMatch = matches.sort((a, b) => b.purchase_date.localeCompare(a.purchase_date))[0];
-          return {
-            id: stock.id,
-            expiry_date: latestMatch.expiry_date || '9999-12-31',
-            expiry_updated_at: now,
-            updated_at: now
-          };
-        }
-        return null;
-      }).filter(Boolean);
-
-      if (updateRows.length > 0) {
-        await fetch(`${SUPABASE_URL}/rest/v1/realtime_stocks`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': SERVICE_KEY,
-            'Authorization': `Bearer ${SERVICE_KEY}`,
-            'Prefer': 'resolution=merge-duplicates'
-          },
-          body: JSON.stringify(updateRows)
-        });
-      }
-    }
-  }
-
+  // 在庫側の期限・ロット内訳は、続けて行う「STEP2 現在庫同期」で全件計算し直す
   return { success: true, count: historyRows.length };
 }
+
+// --- 期限・ロットの引き当て ---
+// 同じ納品が「コードあり」と「コードなし（旧取込分）」の両方で残っている場合、コードありを採用する
+const codeRank = (code: string) => janKey(code) ? 2 : code ? 1 : 0;
+
+const prepareHistory = (rows: any[]): any[] => {
+  const groupKey = (h: any) => `${h.purchase_date}_${normalize(h.name)}_${h.lot_number}`;
+  const best = new Map<string, number>();
+  for (const h of rows) {
+    const k = groupKey(h);
+    best.set(k, Math.max(best.get(k) ?? 0, codeRank(h.yakka_code)));
+  }
+  const list = rows
+    .filter(h => codeRank(h.yakka_code) === best.get(groupKey(h)))
+    .map(h => ({ ...h, quantity: Number(h.quantity) || 0 }));
+
+  // 納品日の新しい順。同日なら期限の長いものを新しい在庫とみなす
+  list.sort((a, b) =>
+    (b.purchase_date || '').localeCompare(a.purchase_date || '') ||
+    (b.expiry_date || '').localeCompare(a.expiry_date || ''));
+
+  // 返品（マイナス入庫）は、同じ薬品・同じロットの直近の納品から差し引く
+  const byLot = new Map<string, any[]>();
+  for (const h of list) {
+    const k = `${normalize(h.name)}_${h.lot_number}`;
+    if (!byLot.has(k)) byLot.set(k, []);
+    byLot.get(k)!.push(h);
+  }
+  for (const group of byLot.values()) {
+    for (const ret of group.filter(h => h.quantity < 0)) {
+      let back = -ret.quantity;
+      for (const h of group) {
+        if (back <= 0) break;
+        if (h.quantity <= 0 || h.purchase_date > ret.purchase_date) continue;
+        const cut = Math.min(back, h.quantity);
+        h.quantity = roundQty(h.quantity - cut);
+        back = roundQty(back - cut);
+      }
+      ret.quantity = 0;
+    }
+  }
+  return list.filter(h => h.quantity > 0);
+};
+
+/**
+ * 入庫履歴1件ごとに「どの在庫行のものか」を決めて、新しい順に在庫へ割り当てる。
+ * 1件の入庫が複数の在庫行で二重に数えられないよう、割り当てた分は減らしていく。
+ *  照合順：JANコード → 厚生省コード → 薬品名（同名が複数あれば包装も照合）
+ */
+const allocateLots = (stocks: any[], history: any[]) => {
+  const index = (map: Map<string, any[]>, key: string, v: any) => {
+    if (!key) return;
+    if (!map.has(key)) map.set(key, []);
+    if (!map.get(key)!.includes(v)) map.get(key)!.push(v);
+  };
+  const byJan = new Map<string, any[]>();
+  const byYj = new Map<string, any[]>();
+  const byName = new Map<string, any[]>();
+  for (const s of stocks) {
+    s.remaining = Math.max(0, s.stockQty);
+    s.details = [];
+    s.jans.forEach((j: string) => index(byJan, janKey(j), s));
+    index(byYj, s.yakka, s);
+    index(byName, normalize(s.name), s);
+  }
+
+  for (const h of prepareHistory(history)) {
+    const name = normalize(h.name);
+    let owners = byJan.get(janKey(h.yakka_code)) || [];
+    if (owners.length === 0) {
+      // 同じコードで包装違いの行がある場合は、名前まで一致する行を優先
+      const yj = byYj.get(h.yakka_code) || [];
+      const yjSameName = yj.filter(s => normalize(s.name) === name);
+      owners = yjSameName.length > 0 ? yjSameName : yj;
+    }
+    if (owners.length === 0) owners = byName.get(name) || [];
+    if (owners.length > 1 && h.pack_key) {
+      const samePack = owners.filter(s => s.packKey === h.pack_key);
+      if (samePack.length > 0) owners = samePack;
+    }
+
+    let left = h.quantity;
+    for (const s of [...owners].sort((a, b) => b.remaining - a.remaining)) {
+      const take = roundQty(Math.min(left, s.remaining));
+      if (take <= 0) continue;
+      s.details.push({
+        lot: h.lot_number || '不明',
+        expiry: h.expiry_date || '9999-12-31',
+        qty: take,
+        purchase_date: h.purchase_date
+      });
+      s.remaining = roundQty(s.remaining - take);
+      left = roundQty(left - take);
+    }
+  }
+
+  // 納品履歴をすべて足しても在庫数に満たない場合、不足分を「不明」として追加
+  for (const s of stocks) {
+    if (s.details.length > 0 && s.remaining > 0) {
+      s.details.push({ lot: '不明（履歴不足）', expiry: '9999-12-31', qty: s.remaining, purchase_date: null });
+    }
+  }
+};
 
 /**
  * リアルタイム在庫（レセコンデータ）専用の処理
  */
 async function processRealtimeMode(csvText: string, store_id: string, SUPABASE_URL: string, SERVICE_KEY: string) {
   const now = new Date().toISOString();
-  // 1. 入庫履歴を「購入日が新しい順」に全件取得
-  const historyRes = await fetch(`${SUPABASE_URL}/rest/v1/purchase_history?store_id=eq.${encodeURIComponent(store_id)}&order=purchase_date.desc`, {
-    headers: { 'apikey': SERVICE_KEY, 'Authorization': `Bearer ${SERVICE_KEY}` }
-  });
-  let allHistory: any[] = [];
-  if (historyRes.ok) {
-    allHistory = await historyRes.json();
+  // 1. 入庫履歴を全件取得（Supabaseは1回に最大1000件しか返さないため、無くなるまで繰り返し取得する）
+  const allHistory: any[] = [];
+  while (true) {
+    const historyRes = await fetch(`${SUPABASE_URL}/rest/v1/purchase_history?store_id=eq.${encodeURIComponent(store_id)}&order=purchase_date.desc,id.desc&limit=1000&offset=${allHistory.length}`, {
+      headers: { 'apikey': SERVICE_KEY, 'Authorization': `Bearer ${SERVICE_KEY}` }
+    });
+    if (!historyRes.ok) throw new Error(`入庫履歴の取得失敗: ${await historyRes.text()}`);
+    const page = await historyRes.json();
+    if (page.length === 0) break;
+    allHistory.push(...page);
   }
-
-  // 検索用Map作成: yakka_codeと、正規化した名称の両方で引けるようにする
-  const historyMap = new Map<string, any[]>();
-  allHistory.forEach(h => {
-    if (h.yakka_code) {
-      if (!historyMap.has(h.yakka_code)) historyMap.set(h.yakka_code, []);
-      historyMap.get(h.yakka_code)!.push(h);
-    }
-    const normalizedName = normalize(h.name);
-    if (!historyMap.has(normalizedName)) historyMap.set(normalizedName, []);
-    historyMap.get(normalizedName)!.push(h);
-  });
 
   const cleanText = csvText.replace(/\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const allLines = cleanText.split('\n').filter(l => l.trim() !== '');  
@@ -315,75 +424,42 @@ async function processRealtimeMode(csvText: string, store_id: string, SUPABASE_U
     }
   }
 
-const realtimeRows = allLines.slice(1).map(line => {
-  const cols = splitCsvLine(line);
-  if (cols.length <= Math.max(...Object.values(idx))) return null;
-  
-  const stockQty = toNum(cols[idx.stock]);
-  const name = cleanCode(cols[idx.name]);
-  if (!name || stockQty === 0) return null;
-  const yakka = idx.yj !== -1 ? cleanCode(cols[idx.yj]) : '';
-  const normalizedName = normalize(name);
+  // JANコード列（天六店形式は見出しの無い18列目に「;」区切りで入っている）
+  const janHeaderIdx = headers.findIndex(h => h.includes('JAN'));
 
-  // --- 理論在庫の期限充填ロジック ---
-  // Mapから該当する履歴を高速取得
-  const matches = (yakka ? historyMap.get(yakka) : null) || historyMap.get(normalizedName) || [];  
-  let mainExpiry = '9999-12-31';
-  let details: any[] = []; // 内訳データ用
+  // 在庫0の行も、入庫履歴が別の行へ誤って割り当てられないよう照合には含める
+  const stocks = allLines.slice(1).map(line => {
+    const cols = splitCsvLine(line);
+    if (cols.length <= Math.max(...Object.values(idx))) return null;
+    const name = cleanCode(cols[idx.name]);
+    if (!name) return null;
+    const janCols = janHeaderIdx !== -1 ? [cols[janHeaderIdx]] : cols.slice(headers.length);
+    return {
+      name,
+      yakka: idx.yj !== -1 ? cleanCode(cols[idx.yj]) : '',
+      spec: idx.spec !== -1 ? cleanCode(cols[idx.spec]) : '',
+      unit: idx.unit !== -1 ? cleanCode(cols[idx.unit]) : '',
+      stockQty: toNum(cols[idx.stock]),
+      jans: janCols.join(';').split(';').map(cleanCode).filter(Boolean),
+      packKey: isMinamimorimachiFormat ? makePackKey(cols[2], cols[3]) : '',
+    } as any;
+  }).filter(Boolean) as any[];
 
- if (matches.length > 0) {
-      let remaining = stockQty;
-      const tempDetails = [];
-      // 納品日が新しい順に在庫数を埋めていく
-      for (const m of matches) {
-        if (remaining <= 0) break;
-    const historyQty = m.quantity || 0;
-    const take = Math.min(remaining, historyQty);
-    
-    if (take > 0) {
-      tempDetails.push({
-          lot: m.lot_number || '不明',
-          expiry: m.expiry_date || '9999-12-31',
-          qty: take,
-          purchase_date: m.purchase_date
-        });
-        remaining -= take;
-      }
-    }
+  allocateLots(stocks, allHistory);
 
-    // 納品履歴をすべて足しても在庫数に満たない場合、不足分を「不明」として追加
-    if (remaining > 0) {
-      tempDetails.push({
-        lot: '不明（履歴不足）',
-        expiry: '9999-12-31',
-        qty: remaining,
-        purchase_date: null
-      });
-    }
-
-    details = tempDetails;
-
-    // 代表期限：現在庫として算出したバッチの中で「最も期限が近いもの」を選択
-    // これにより、古い在庫が混じっている場合に正しくリスクを表示できる
-    mainExpiry = details.reduce((min, d) => {
-      if (!d.expiry || d.expiry === '未設定') return min;
-      return d.expiry < min ? d.expiry : min;
-    }, '9999-12-31');
-  }
-
-  return {
+  const realtimeRows = stocks.filter(s => s.stockQty !== 0).map(s => ({
     store_id,
-    yakka_code: yakka,
-    name,
-    spec: idx.spec !== -1 ? cleanCode(cols[idx.spec]) : '',
-    stock_qty: stockQty,
-    unit: idx.unit !== -1 ? cleanCode(cols[idx.unit]) : '',
-    expiry_date: mainExpiry,
-    expiry_details: details,
-    stock_updated_at: now, 
-    updated_at: now       
-  };
-}).filter(Boolean);
+    yakka_code: s.yakka,
+    name: s.name,
+    spec: s.spec,
+    stock_qty: s.stockQty,
+    unit: s.unit,
+    // 代表期限：割り当てたロットの中で「最も期限が近いもの」
+    expiry_date: s.details.reduce((min: string, d: any) => (d.expiry < min ? d.expiry : min), '9999-12-31'),
+    expiry_details: s.details,
+    stock_updated_at: now,
+    updated_at: now
+  }));
 
     if (realtimeRows.length === 0) {
     throw new Error("有効な在庫データが見つかりませんでした。ファイル形式を確認してください。");

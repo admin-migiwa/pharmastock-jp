@@ -2,6 +2,33 @@ PharmaStock JP - CHANGELOG
 （新しい変更ほど上に追記してください）
 ========================================
 
+【26pharmastock-jp】20261125_発注取込・未納品照合の1000件上限を解消／同じ日の同一発注を別々に登録
+対象: OrderManagement.tsx / orderMatch.ts / supabase/orders.sql / supabase/orders_unique_key_time_supplier.sql(新規)
+
+- 発注が1000件を超えると、一覧・集計の欠落や再取込の失敗が起こる不具合を修正（全件取得に変更）
+- 入庫との照合も発注・入庫履歴を全件対象に変更。JAN（13桁）とGS1（14桁）は共通の12桁で照合
+- 同じ日・同じ薬・同じ数量でも、発注時刻または卸が違えば別の発注として登録
+- 時刻・卸まで同じ行は1件にまとめ、件数を取込結果に表示（CSV内・複数ファイル間の重複で取込が失敗しないように変更）
+- 同じ日の発注には、時刻の早い順に入庫を割り当てるよう変更
+- 既存の発注データを取得できないときは、取込を中止してエラーを表示
+- 反映手順：①Supabase SQL Editorで supabase/orders_unique_key_time_supplier.sql を実行 ②アプリを公開（必ずこの順番）
+
+----------------------------------------
+
+【25pharmastock-jp】20261125_在庫照会の期限・ロット内訳の計算を改修
+対象: supabase/functions/import-inventory/index.ts / RealtimeSearch.tsx / supabase/purchase_history_pack_key.sql(新規)
+
+- 入庫履歴が1000件を超えると古い履歴が期限計算から漏れる不具合を修正（全件取得に変更）
+- 入庫の「単位」列（箱・本・袋・錠・ｇ・mL等）を見て換算。バラ単位の入庫（他店分譲など）に内容量を二重に掛けていた不具合を修正
+- 返品（マイナス入庫）を同じロットの納品から差し引くよう変更
+- 在庫との照合を JANコード→厚生省コード→薬品名 の順に変更。同名の在庫が複数行ある場合のロット二重計上を解消（南森町形式は包装も照合）
+- JANコードが空欄の入庫で、同日・同ロットの別薬品が合算され得る不具合を修正
+- 期限・入庫日が不明な内訳は「不明」と表示
+- 反映手順：①Supabase SQL Editorで supabase/purchase_history_pack_key.sql を実行 ②Edge Function import-inventory を再デプロイ
+  ③各店舗で STEP1（入庫履歴。できるだけ長い期間）→ STEP2（現在庫）を再取込
+
+----------------------------------------
+
 【24pharmastock-jp】20261114-20261116_マニュアル・READMEの更新／古い厚労省ファイルの削除
 対象: components/Manual.tsx / README.md / 260821iyakuhinkyoukyu.xlsx(削除)
 

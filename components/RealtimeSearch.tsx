@@ -575,13 +575,13 @@ const performSearch = useCallback(async (query: string, storeId: string, all: bo
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                               {details[uniqueId].map((d, i) => (
                                 <div key={i} className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
-                                  <div className="text-[9px] text-slate-400 font-mono mb-1">{d.purchase_date} 入庫</div>
+                                  <div className="text-[9px] text-slate-400 font-mono mb-1">{d.purchase_date === '不明' ? '入庫日不明' : `${d.purchase_date} 入庫`}</div>
                                   <div className="flex justify-between items-center">
                                     <span className="text-[10px] font-black text-slate-700">Lot: {d.lot_number}</span>
                                     <span className="text-sm font-black text-blue-600">{d.quantity}{result.stock.unit}</span>
                                   </div>
                                   <div className={`text-[9px] font-bold mt-1 ${getExpiryStatus(d.expiry_date).class}`}>
-                                    期限: {d.expiry_date || '不明'}
+                                    期限: {d.expiry_date && d.expiry_date !== '9999-12-31' ? d.expiry_date : '不明'}
                                   </div>
                                 </div>
                               ))}
