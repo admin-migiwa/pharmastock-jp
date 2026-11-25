@@ -31,7 +31,7 @@ import {
 } from 'lucide-react';
 import { Store, Order, OrderStatus, IgnoredOrderItem, ShipmentLookup } from '../types';
 import { supabase } from '../supabase';
-import { parseOrderCsv, reconcileOrders, getDelayBadge, DelayBadgeInfo } from '../orderMatch';
+import { type ParsedOrderRow, parseOrderCsv, reconcileOrders, fetchAllPages, normalizeOrderTime, getDelayBadge, DelayBadgeInfo } from '../orderMatch';
 import { lookupShipment, getShipmentBadge, normalizeName, isDelisting, DELISTING_LABEL } from '../shipmentMatch';
 import {
   DeliveryRule,
@@ -155,14 +155,13 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     try {
       await fetchIgnoredItems();
 
-      const { data, error } = await supabase
+      const fetchedOrders = await fetchAllPages<Order>((from, to) => supabase
         .from('orders')
         .select('*')
         .eq('store_id', currentStoreId)
-        .order('order_date', { ascending: false });
-
-      if (error) throw error;
-      const fetchedOrders = (data as Order[]) || [];
+        .order('order_date', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, to));
       setOrders(fetchedOrders);
 
       // 出荷状況の突合
@@ -668,12 +667,23 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
     setLoading(true);
     setUploadMessage(null);
 
-    const { data: existingDbOrders } = await supabase
-      .from('orders')
-      .select('*')
-      .eq('store_id', currentStoreId);
-
-    const existingPool = [...((existingDbOrders as Order[]) || [])];
+    // 重複判定の対象。取得に失敗したまま続けると既存分まで新規登録してしまうため中断する
+    let existingPool: Order[];
+    try {
+      existingPool = await fetchAllPages<Order>((from, to) => supabase
+        .from('orders')
+        .select('*')
+        .eq('store_id', currentStoreId)
+        .order('order_date', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, to));
+    } catch (err: any) {
+      console.error('Fetch existing orders error:', err);
+      setUploadMessage({ type: 'error', text: `既存の発注データの取得に失敗したため、取込を中止しました: ${err.message}` });
+      setLoading(false);
+      event.target.value = '';
+      return;
+    }
 
     const { data: latestIgnored } = await supabase
       .from('ignored_order_items')
@@ -683,6 +693,17 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
     let totalImported = 0;
     let autoIgnoredCount = 0;
+    // 発注日・JAN・数量・時刻・卸がすべて同じ行だけを重複とみなす（DBの一意制約と同じ単位）。全ファイル通して記録する
+    const rowKey = (o: { order_date: string; jan_code: string; order_qty: number; order_time?: string | null; supplier?: string | null }) =>
+      JSON.stringify([o.order_date, o.jan_code, o.order_qty, normalizeOrderTime(o.order_time), o.supplier || '']);
+    const processedKeys = new Set<string>();
+    let duplicateCount = 0;
+    const takeExisting = (isMatch: (o: Order) => boolean): Order | undefined => {
+      const idx = existingPool.findIndex(isMatch);
+      return idx === -1 ? undefined : existingPool.splice(idx, 1)[0];
+    };
+    // 片方に値がない場合も一致とみなす（時刻や卸が未登録の旧データ用）
+    const isCompatible = (a: string, b: string) => !a || !b || a === b;
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -695,7 +716,35 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
         const updates: Partial<Order>[] = [];
         const inserts: Omit<Order, 'id'>[] = [];
 
-        parsedRows.forEach(r => {
+        const uniqueRows = parsedRows.filter(r => {
+          const key = rowKey(r);
+          if (processedKeys.has(key)) return false;
+          processedKeys.add(key);
+          return true;
+        });
+
+        // 完全一致を先に全行分確定させ、残りだけを時刻・卸が未登録の既存データと対応付ける
+        const matches = new Map<ParsedOrderRow, Order>();
+        uniqueRows.forEach(r => {
+          const key = rowKey(r);
+          const found = takeExisting(o => rowKey(o) === key);
+          if (found) matches.set(r, found);
+        });
+        uniqueRows.forEach(r => {
+          if (matches.has(r)) return;
+          const found = takeExisting(o =>
+            o.order_date === r.order_date &&
+            o.jan_code === r.jan_code &&
+            o.order_qty === r.order_qty &&
+            isCompatible(normalizeOrderTime(o.order_time), normalizeOrderTime(r.order_time)) &&
+            isCompatible(o.supplier || '', r.supplier || ''));
+          if (found) {
+            matches.set(r, found);
+            processedKeys.add(rowKey({ ...r, order_time: found.order_time || r.order_time, supplier: r.supplier || found.supplier }));
+          }
+        });
+
+        uniqueRows.forEach(r => {
           const isIgnoredByMaster = ignoredList.some(ig => 
             (ig.jan_code && ig.jan_code === r.jan_code) ||
             (ig.name_key && ig.name_key === r.name_key)
@@ -707,22 +756,13 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
           const initialStatus: OrderStatus = isIgnoredByMaster ? 'cancelled' : 'pending';
 
-          const matchIdx = existingPool.findIndex(o => 
-            o.store_id === currentStoreId &&
-            o.order_date === r.order_date &&
-            o.jan_code === r.jan_code &&
-            o.order_qty === r.order_qty
-          );
-
-          if (matchIdx !== -1) {
-            const existing = existingPool[matchIdx];
-            existingPool.splice(matchIdx, 1);
-
+          const existing = matches.get(r);
+          if (existing) {
             updates.push({
               id: existing.id,
               store_id: currentStoreId,
               order_date: r.order_date,
-              order_time: r.order_time || existing.order_time,
+              order_time: existing.order_time || r.order_time,
               delivery_date: r.delivery_date,
               actual_delivery_date: existing.actual_delivery_date,
               delay_days: existing.delay_days,
@@ -766,10 +806,13 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
 
         if (inserts.length > 0) {
           const { error: insertErr } = await supabase.from('orders').insert(inserts);
-          if (insertErr) throw new Error(`新規登録失敗: ${insertErr.message}`);
+          if (insertErr) throw new Error(insertErr.code === '23505'
+            ? '新規登録失敗: 同じ発注が登録済みです。orders_unique_key_time_supplier.sql がデータベースに適用されているか確認してください。'
+            : `新規登録失敗: ${insertErr.message}`);
         }
 
-        totalImported += parsedRows.length;
+        totalImported += uniqueRows.length;
+        duplicateCount += parsedRows.length - uniqueRows.length;
       } catch (err: any) {
         console.error(`Error processing file ${file.name}:`, err);
         setUploadMessage({ type: 'error', text: `${file.name} の保存に失敗しました: ${err.message}` });
@@ -783,6 +826,9 @@ export const OrderManagement: React.FC<OrderManagementProps> = ({ stores, curren
       let msg = `${totalImported} 件の発注データをインポートしました。`;
       if (autoIgnoredCount > 0) {
         msg += ` (${autoIgnoredCount} 件を除外マスタに基づき自動除外)`;
+      }
+      if (duplicateCount > 0) {
+        msg += ` (時刻・卸まで同じ重複 ${duplicateCount} 件は1件にまとめました)`;
       }
       setUploadMessage({ type: 'success', text: `${msg} 照合を実行中...` });
 

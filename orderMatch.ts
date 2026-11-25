@@ -12,6 +12,39 @@ export const normalizeJanCode = (code: string | null | undefined): string => {
   return cleaned;
 };
 
+// 照合専用キー。JAN13とGS1 14桁は共通の12桁で比較する（末尾のチェックディジットは両者で異なるため除く）。
+// 保存値（orders.jan_code は再取込時の重複判定キー）を変えないよう、normalizeJanCode とは分けている。
+const toJanMatchKey = (code: string | null | undefined): string => {
+  const cleaned = (code || '').toString().replace(/[-_ \u3000]/g, '').trim();
+  if (/^\d{14}$/.test(cleaned)) return cleaned.slice(1, 13);
+  if (/^\d{13}$/.test(cleaned)) return cleaned.slice(0, 12);
+  // 厚生省コード等、JAN/GS1以外はそのまま比較（12桁数字でもJANの12桁と混同しないよう区別）
+  return cleaned ? 'raw:' + cleaned : '';
+};
+
+// 発注時刻の比較用表記。「9:05」「09:05:00」のような表記差を吸収する（保存値は変えない）
+export const normalizeOrderTime = (time: string | null | undefined): string => {
+  const t = (time || '').trim();
+  const m = t.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  return m ? `${m[1].padStart(2, '0')}:${m[2]}:${m[3] || '00'}` : t;
+};
+
+const PAGE_SIZE = 1000;
+
+// Supabaseは1回の取得が既定で最大1000件のため、空になるまで続きを取得する。
+// 呼び出し側は、ページ間で順序が変わらないよう一意な列(id)まで並び順に含めること。
+export const fetchAllPages = async <T,>(
+  fetchPage: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>
+): Promise<T[]> => {
+  const all: T[] = [];
+  while (true) {
+    const { data, error } = await fetchPage(all.length, all.length + PAGE_SIZE - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) return all;
+    all.push(...data);
+  }
+};
+
 export interface ParsedOrderRow {
   order_date: string;
   order_time: string | null;
@@ -177,25 +210,32 @@ export const getDelayBadge = (order: Order, rule: DeliveryRule = DEFAULT_DELIVER
 export const reconcileOrders = async (storeId: string, marginDays = 7, customRules?: DeliveryRuleSet) => {
   // 卸ごとの納品ルール一式（未指定ならデータベースから読み込む）
   const ruleSet = customRules || (await loadDeliveryRules(storeId)).set;
-  const { data: allOrders, error: orderErr } = await supabase
+  const allOrders = await fetchAllPages<Order>((from, to) => supabase
     .from('orders')
     .select('*')
     .eq('store_id', storeId)
     .neq('status', 'cancelled')
     .order('order_date', { ascending: true })
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
+    .range(from, to));
 
-  if (orderErr) throw orderErr;
-  if (!allOrders || allOrders.length === 0) return { updatedCount: 0 };
+  if (allOrders.length === 0) return { updatedCount: 0 };
 
-  const { data: purchases, error: purErr } = await supabase
+  // 同じ日の発注は時刻の早い順に入庫を割り当てる（同時刻は取得時の登録順のまま）
+  allOrders.sort((a, b) =>
+    a.order_date.localeCompare(b.order_date) ||
+    normalizeOrderTime(a.order_time).localeCompare(normalizeOrderTime(b.order_time)));
+
+  // 最古の発注日より前の入庫は照合対象にならないため取得しない（発注は日付の昇順）
+  const purList = await fetchAllPages<any>((from, to) => supabase
     .from('purchase_history')
     .select('*')
     .eq('store_id', storeId)
-    .order('purchase_date', { ascending: true });
-
-  if (purErr) throw purErr;
-  const purList = purchases || [];
+    .gte('purchase_date', allOrders[0].order_date)
+    .order('purchase_date', { ascending: true })
+    .order('id', { ascending: true })
+    .range(from, to));
 
   // 入庫履歴をプールに変換（他店分譲伝票を除外し、純粋な卸からの入庫のみに絞り込む）
   const purchasePool = purList
@@ -220,7 +260,7 @@ export const reconcileOrders = async (storeId: string, marginDays = 7, customRul
       return {
         id: p.id,
         purchase_date: p.purchase_date,
-        jan_code: normalizeJanCode(p.yakka_code || (p as any).jan_code),
+        jan_key: toJanMatchKey(p.yakka_code || (p as any).jan_code),
         name_key: normalizeName(p.name),
         supplier: supp,
         is_transfer: isTransfer,
@@ -233,7 +273,7 @@ export const reconcileOrders = async (storeId: string, marginDays = 7, customRul
   const todayStr = new Date().toISOString().slice(0, 10);
   const updates: Partial<Order>[] = [];
 
-  for (const ord of allOrders as Order[]) {
+  for (const ord of allOrders) {
     // 発注先の卸に設定された納品ルール（なければ店舗の基本ルール）
     const rule = resolveDeliveryRule(ruleSet, ord.supplier);
     // そのルールに基づいた予定納品日を計算 (土日祝や発注締め時刻を考慮)
@@ -244,6 +284,7 @@ export const reconcileOrders = async (storeId: string, marginDays = 7, customRul
     maxDate.setDate(maxDate.getDate() + marginDays);
     const maxDateStr = maxDate.toISOString().slice(0, 10);
 
+    const orderJanKey = toJanMatchKey(ord.jan_code);
     let needed = ord.order_qty;
     let allocatedBoxQty = 0;
     let firstDelivDate: string | null = null;
@@ -254,7 +295,7 @@ export const reconcileOrders = async (storeId: string, marginDays = 7, customRul
       if (poolItem.available_boxes <= 0) continue;
       if (poolItem.purchase_date < ord.order_date || poolItem.purchase_date > maxDateStr) continue;
 
-      const janMatch = ord.jan_code && poolItem.jan_code && ord.jan_code === poolItem.jan_code;
+      const janMatch = orderJanKey && poolItem.jan_key && orderJanKey === poolItem.jan_key;
       const nameMatch = ord.name_key && poolItem.name_key && ord.name_key === poolItem.name_key;
 
       if (!janMatch && !nameMatch) continue;
