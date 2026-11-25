@@ -53,8 +53,13 @@ const toStr = (v: any): string => {
 };
 const toDateStr = (v: any): string | null => {
   if (v instanceof Date && !isNaN(v.getTime())) return v.toISOString().slice(0, 10);
-  const s = toStr(v);
-  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : null;
+  // 日付が文字列で入っている版にも対応（例：2024年12月02日、2024/12/2、2024-12-02）
+  const m = toStr(v).normalize('NFKC').match(/^(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})(?!\d)/);
+  if (!m) return null;
+  const iso = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  // 実在しない日付（例：2024年2月30日）は空欄として扱う
+  const d = new Date(`${iso}T00:00:00Z`);
+  return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === iso ? iso : null;
 };
 const orNull = (v: any): string | null => {
   const s = toStr(v);

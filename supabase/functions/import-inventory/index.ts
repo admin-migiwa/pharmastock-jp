@@ -81,6 +81,10 @@ const janKey = (code: string): string => {
 const makePackKey = (type: string, size: string): string =>
   `${normalize(type)}|${toNum(size) || ''}`;
 
+// 仕入先が卸ではなく他の薬局（分譲・店舗間移動）か。画面側 orderMatch.ts の isTransferSupplier と同じ条件
+const isTransferSupplier = (s: string): boolean =>
+  /分譲|譲受|薬局|他店|移管|譲渡/.test((s || '').normalize('NFKC'));
+
 const splitCsvLine = (line: string): string[] => {
   const result: string[] = [];
   let curVal = '';
@@ -168,6 +172,7 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
     .map(k => headers.indexOf(k)).filter(i => i !== -1);
   const specIdx = headers.indexOf('規格');
   const unitIdx = headers.indexOf('単位');
+  const supplierIdx = ['仕入先名', '仕入先', '発注先'].map(k => headers.indexOf(k)).find(i => i !== -1) ?? -1;
   const packIdx = headers.indexOf('包装単位総量'); // 南森町形式（右隣の無題列が総量）
 
   const rowsMap = new Map<string, any>();
@@ -199,6 +204,15 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
     const lotNumber = cleanCode(cols[idx.lot]) || 'LOT不明';
 
     
+    // 発注との照合に使う納品箱数（箱数を確定できない本・錠などの単位は null）
+    // 「届いた事実」を見るためのものなので、返品（マイナス）は差し引かない
+    const packTotal = packIdx !== -1 ? toNum(cols[packIdx + 1]) : 0;
+    const rowSupplier = supplierIdx !== -1 ? cleanCode(cols[supplierIdx]) : '';
+    const rowBoxQty = boxQty < 0 ? 0 : packTotal > 0
+      ? roundQty(boxQty / packTotal)                                      // 南森町形式：数量 ÷ 1箱の総量
+      : unitIdx !== -1 && normUnit(cleanCode(cols[unitIdx])) === '箱' ? boxQty // 天六形式：単位が箱なら入庫数のまま
+      : null;
+
     // 数量(qty)をキーから外し、同一納品として集約する
     const compositeKey = `${purchaseDate}_${yakkaCode}_${lotNumber}`;
 
@@ -206,6 +220,22 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
       // すでに同じキーがあれば、数量を合算する
       const existing = rowsMap.get(compositeKey);
       existing.quantity = roundQty(existing.quantity + totalUnitQty);
+      // 同じ日・同じロットに卸と他店の入庫が混在する場合、仕入先と箱数は卸の分だけを採用する
+      // （期限・ロット用の quantity は全部を合算したまま）。返品行の仕入先は採用しない
+      if (boxQty > 0) {
+        const isEmpty = existing.supplier === null && existing.box_qty === 0; // ここまで返品行だけ
+        const wasTransfer = isTransferSupplier(existing.supplier || '');
+        const isTransfer = isTransferSupplier(rowSupplier);
+        if (isEmpty || (wasTransfer && !isTransfer)) {
+          existing.supplier = rowSupplier || null;
+          existing.box_qty = rowBoxQty;
+        } else if (wasTransfer === isTransfer) {
+          existing.box_qty = existing.box_qty === null || rowBoxQty === null ? null : roundQty(existing.box_qty + rowBoxQty);
+          if (rowSupplier && !(existing.supplier || '').split('/').includes(rowSupplier)) {
+            existing.supplier = existing.supplier ? `${existing.supplier}/${rowSupplier}` : rowSupplier;
+          }
+        }
+      }
       if (!existing.expiry_date) existing.expiry_date = toDate(cols[idx.expiry]);
       existing.updated_at = now;
     } else {
@@ -217,6 +247,8 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
         lot_number: lotNumber,
         expiry_date: toDate(cols[idx.expiry]),
         quantity: totalUnitQty,
+        box_qty: rowBoxQty,
+        supplier: boxQty > 0 ? rowSupplier || null : null,
         pack_key: packIdx !== -1 ? makePackKey(cols[packIdx], cols[packIdx + 1]) : null,
         updated_at: now
       });
@@ -228,7 +260,9 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
 
   // 1. 入庫履歴の保存（バッチ処理 500件ずつ）
   const BATCH_SIZE = 500;
-  let usePackKey = true;
+  // 追加SQLが未実行で列が無いDBでも取り込めるよう、存在しない列は外して送り直す
+  const optionalCols = new Set(['pack_key', 'box_qty', 'supplier']);
+  const missingCols = new Set<string>();
   for (let i = 0; i < historyRows.length; i += BATCH_SIZE) {
     const batch = historyRows.slice(i, i + BATCH_SIZE);
     const postBatch = () => fetch(`${SUPABASE_URL}/rest/v1/purchase_history?on_conflict=store_id,purchase_date,yakka_code,lot_number`, {
@@ -239,18 +273,16 @@ async function processPurchaseHistoryMode(csvText: string, store_id: string, SUP
         'Authorization': `Bearer ${SERVICE_KEY}`,
         'Prefer': 'resolution=merge-duplicates',
       },
-      body: JSON.stringify(usePackKey ? batch : batch.map(({ pack_key: _omit, ...rest }: any) => rest))
+      body: JSON.stringify(batch.map(r => Object.fromEntries(Object.entries(r).filter(([k]) => !missingCols.has(k)))))
     });
     let historyRes = await postBatch();
-    // pack_key 列の追加SQL（purchase_history_pack_key.sql）が未実行でも取り込めるようにする
-    if (!historyRes.ok && usePackKey) {
+    while (!historyRes.ok) {
       const errText = await historyRes.text();
-      if (!errText.includes('pack_key')) throw new Error(`入庫履歴の保存失敗(${i}件目〜): ${errText}`);
-      usePackKey = false;
+      const missing = [...optionalCols].find(c => !missingCols.has(c) && errText.includes(c));
+      if (!missing) throw new Error(`入庫履歴の保存失敗(${i}件目〜): ${errText}`);
+      missingCols.add(missing);
       historyRes = await postBatch();
     }
-    // 失敗を握りつぶさない（これが無いと「更新完了」の誤表示につながる）
-    if (!historyRes.ok) throw new Error(`入庫履歴の保存失敗(${i}件目〜): ${await historyRes.text()}`);
   }
 
   // 在庫側の期限・ロット内訳は、続けて行う「STEP2 現在庫同期」で全件計算し直す

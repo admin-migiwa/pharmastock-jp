@@ -45,6 +45,41 @@ export const fetchAllPages = async <T,>(
   }
 };
 
+const UNIT_ALIAS: Record<string, string> = { 'カプセル': 'C', 'CAP': 'C', 'キッ': 'キット', 'グラム': 'G', 'CC': 'ML' };
+const normUnit = (u: string): string => {
+  const k = u.normalize('NFKC').replace(/\s/g, '').toUpperCase();
+  return UNIT_ALIAS[k] || k;
+};
+
+// 発注CSVの規格容量から、1箱の総量を単位ごとに求める。
+// 例「5mg/錠 PTP 10錠×10」→ 100錠、「0.12%1g 5g×10本」→ 50g または 10本
+export const parsePackTotals = (spec: string | null | undefined): { unit: string; total: number }[] => {
+  const s = (spec || '').normalize('NFKC').replace(/,/g, '').replace(/\([^()]*\)/g, '').trim();
+  const num = '(\\d+(?:\\.\\d+)?)';
+  const unit = '([^\\d\\s×xX*/.%]+)';
+  const m = s.match(new RegExp(`${num}\\s*${unit}\\s*[×xX*]\\s*${num}\\s*${unit}?$`));
+  if (m) {
+    const totals = [{ unit: normUnit(m[2]), total: Number(m[1]) * Number(m[3]) }];
+    const outer = m[4] ? normUnit(m[4]) : '';
+    if (outer && outer !== totals[0].unit) totals.push({ unit: outer, total: Number(m[3]) });
+    return totals.filter(t => t.total > 0);
+  }
+  // 「バラ 1000錠」のように掛け算のない規格
+  const single = s.match(new RegExp(`(?:^|\\s)${num}\\s*${unit}$`));
+  return single && Number(single[1]) > 0 ? [{ unit: normUnit(single[2]), total: Number(single[1]) }] : [];
+};
+
+// 入庫の薬品名の末尾「(PTP1錠)」「(ﾁｭｰﾌﾞ5ｇ)」から数量の単位を取り出し、包装表記を除いた品名も返す
+const splitPackName = (name: string): { base: string; unit: string } => {
+  const n = (name || '').normalize('NFKC').trim();
+  const m = n.match(/\([^()]*\d\s*([^\d()\s.,]+)\)$/);
+  return m ? { base: n.slice(0, m.index), unit: normUnit(m[1]) } : { base: n, unit: '' };
+};
+
+// 仕入先が卸ではなく他の薬局（分譲・店舗間移動）か。取込側 import-inventory の isTransferSupplier と同じ条件
+const isTransferSupplier = (s: string | null | undefined): boolean =>
+  /分譲|譲受|薬局|他店|移管|譲渡/.test((s || '').normalize('NFKC'));
+
 export interface ParsedOrderRow {
   order_date: string;
   order_time: string | null;
@@ -157,7 +192,8 @@ import {
   calculateDelayDays,
   DeliveryRuleSet,
   loadDeliveryRules,
-  resolveDeliveryRule
+  resolveDeliveryRule,
+  normalizeSupplier
 } from './deliveryRule';
 
 /**
@@ -237,43 +273,53 @@ export const reconcileOrders = async (storeId: string, marginDays = 7, customRul
     .order('id', { ascending: true })
     .range(from, to));
 
+  // 同じ納品が旧取込分（JANなし）と二重に残っている場合は、JANありの行だけを使う
+  const isJan = (code: string) => /^\d{13,14}$/.test(code || '');
+  const deliveryKey = (p: any) => `${p.purchase_date}|${normalizeName(p.name)}|${p.lot_number}`;
+  const withJan = new Set(purList.filter(p => isJan(p.yakka_code)).map(deliveryKey));
+
   // 入庫履歴をプールに変換（他店分譲伝票を除外し、純粋な卸からの入庫のみに絞り込む）
   const purchasePool = purList
+    // 返品だけの行は除く。同日に入庫と返品があり総量0の行は「届いた事実」として残す
+    .filter(p => (Number(p.quantity) >= 0 || Number(p.box_qty) > 0) && (isJan(p.yakka_code) || !withJan.has(deliveryKey(p))))
     .map(p => {
-      const q = Number(p.quantity) || 1;
-      let boxes = 1;
-      if (q <= 50) {
-        boxes = q;
-      } else if (q % 100 === 0) {
-        boxes = q / 100;
-      } else if (q % 42 === 0) {
-        boxes = q / 42;
-      } else if (q % 84 === 0) {
-        boxes = q / 84;
-      } else {
-        boxes = Math.max(1, Math.round(q / 100));
-      }
-
+      const pack = splitPackName(p.name);
       const supp = (p as any).supplier || (p as any).wholesaler || (p as any).source || (p as any).trade_type || null;
-      const isTransfer = supp ? /分譲|譲受|薬局|他店|移管|譲渡/i.test(supp) : false;
+      const isTransfer = isTransferSupplier(supp);
 
       return {
         id: p.id,
         purchase_date: p.purchase_date,
         jan_key: toJanMatchKey(p.yakka_code || (p as any).jan_code),
-        name_key: normalizeName(p.name),
+        name_key: normalizeName(pack.base),
+        unit: pack.unit,
+        quantity: Number(p.quantity),
+        box_qty: Number(p.box_qty) > 0 ? Number(p.box_qty) : null,
         supplier: supp,
         is_transfer: isTransfer,
-        available_boxes: boxes,
+        left: 1, // この入庫のうち未割り当ての割合（1 = 全量）
       };
     })
     // 他店分譲（分譲受入）のデータは卸照合のプールから100%排除
     .filter(p => !p.is_transfer);
 
+  const EPS = 0.0001;
+
+  // この入庫が、その発注の包装で何箱分にあたるか
+  const boxesFor = (item: typeof purchasePool[number], packTotals: { unit: string; total: number }[], sameJan: boolean): number => {
+    // 同じJAN（=同じ包装）なら、入庫ファイルの箱数をそのまま使う
+    if (sameJan && item.box_qty !== null) return item.box_qty;
+    // 包装違い、または箱数が未登録の入庫は、総量 ÷ 発注した包装の1箱の総量
+    const pack = item.unit ? packTotals.find(t => t.unit === item.unit) : packTotals[0];
+    if (pack && item.quantity > 0) return item.quantity / pack.total;
+    // 規格から計算できない場合：同じJANなら最低1箱は届いている。包装違いは判断できないため使わない
+    return sameJan ? 1 : 0;
+  };
+
   const todayStr = new Date().toISOString().slice(0, 10);
   const updates: Partial<Order>[] = [];
 
-  for (const ord of allOrders) {
+  const targets = allOrders.map(ord => {
     // 発注先の卸に設定された納品ルール（なければ店舗の基本ルール）
     const rule = resolveDeliveryRule(ruleSet, ord.supplier);
     // そのルールに基づいた予定納品日を計算 (土日祝や発注締め時刻を考慮)
@@ -284,47 +330,62 @@ export const reconcileOrders = async (storeId: string, marginDays = 7, customRul
     maxDate.setDate(maxDate.getDate() + marginDays);
     const maxDateStr = maxDate.toISOString().slice(0, 10);
 
-    const orderJanKey = toJanMatchKey(ord.jan_code);
-    let needed = ord.order_qty;
-    let allocatedBoxQty = 0;
-    let firstDelivDate: string | null = null;
+    return {
+      ord, rule, expectedDate, maxDateStr,
+      janKey: toJanMatchKey(ord.jan_code),
+      packTotals: parsePackTotals(ord.spec),
+      needed: ord.order_qty,
+      firstDelivDate: null as string | null,
+    };
+  });
+
+  // 先に全発注をJANで照合し、残った入庫だけを品名（包装違い）で照合する。
+  // 包装違いの入庫を先に使って、本来の発注が未納品になるのを防ぐため。
+  for (const byJan of [true, false]) for (const target of targets) {
+    const { ord, maxDateStr, janKey: orderJanKey } = target;
 
     // 卸入庫データの消し込み検索
     for (const poolItem of purchasePool) {
-      if (needed <= 0) break;
-      if (poolItem.available_boxes <= 0) continue;
+      if (target.needed <= EPS) break;
+      if (poolItem.left <= EPS) continue;
       if (poolItem.purchase_date < ord.order_date || poolItem.purchase_date > maxDateStr) continue;
 
       const janMatch = orderJanKey && poolItem.jan_key && orderJanKey === poolItem.jan_key;
       const nameMatch = ord.name_key && poolItem.name_key && ord.name_key === poolItem.name_key;
 
-      if (!janMatch && !nameMatch) continue;
+      if (byJan ? !janMatch : janMatch || !nameMatch) continue;
 
       // 卸指定がある場合は、異なる卸からの入庫データは除外
       if (ord.supplier && poolItem.supplier) {
-        const s1 = ord.supplier.replace(/株式会社|（株）|\(株\)|営業所|支店/g, '').trim();
-        const s2 = poolItem.supplier.replace(/株式会社|（株）|\(株\)|営業所|支店/g, '').trim();
+        const s1 = normalizeSupplier(ord.supplier).replace(/営業所|支店/g, '');
+        const s2 = normalizeSupplier(poolItem.supplier).replace(/営業所|支店/g, '');
         const supplierMatch = s1.includes(s2) || s2.includes(s1);
         if (!supplierMatch) continue;
       }
 
-      const take = Math.min(needed, poolItem.available_boxes);
-      allocatedBoxQty += take;
-      needed -= take;
-      poolItem.available_boxes -= take;
+      const boxes = boxesFor(poolItem, target.packTotals, byJan);
+      const take = Math.min(target.needed, boxes * poolItem.left);
+      if (take <= EPS) continue;
+      target.needed -= take;
+      poolItem.left -= take / boxes;
 
-      if (!firstDelivDate && take > 0) {
-        firstDelivDate = poolItem.purchase_date;
+      if (!target.firstDelivDate || poolItem.purchase_date < target.firstDelivDate) {
+        target.firstDelivDate = poolItem.purchase_date;
       }
     }
+  }
 
+  for (const { ord, rule, expectedDate, needed, firstDelivDate } of targets) {
+    // 完納かどうかは端数込みで判定し、画面に出す納品数は揃った箱数（切り捨て）とする
+    const isFull = needed <= EPS;
+    const allocatedBoxQty = isFull ? ord.order_qty : Math.floor(ord.order_qty - needed + EPS);
     let newStatus: OrderStatus = ord.status;
     let delayDays: number | null = ord.delay_days ?? null;
 
-    if (allocatedBoxQty >= ord.order_qty) {
+    if (isFull) {
       newStatus = 'fulfilled';
       if (firstDelivDate) delayDays = calculateDelayDays(firstDelivDate, expectedDate, rule);
-    } else if (allocatedBoxQty > 0) {
+    } else if (firstDelivDate) {
       newStatus = 'partial';
       if (firstDelivDate) delayDays = calculateDelayDays(firstDelivDate, expectedDate, rule);
     } else {
